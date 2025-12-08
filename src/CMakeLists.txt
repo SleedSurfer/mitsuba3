@@ -8,7 +8,8 @@ include_directories(../ext/nanobind/ext/robin_map/include)
 add_subdirectory(core)
 add_subdirectory(render)
 
-add_library(mitsuba SHARED)
+add_library(mitsuba SHARED
+        phase/atmospheric_phase.cpp)
 target_link_libraries(mitsuba PUBLIC mitsuba-core)
 target_link_libraries(mitsuba PUBLIC mitsuba-render)
 set_target_properties(mitsuba PROPERTIES INTERPROCEDURAL_OPTIMIZATION ON)
