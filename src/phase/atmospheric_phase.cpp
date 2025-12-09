@@ -51,23 +51,27 @@ public:
         for (uint32_t a = 0; a < m_resolution; ++a) {
             float max_val = 0.0f;
 
-            // Pointer to the start of this angle's wavelength block
+            // Pointer to the start of this angle's wavelength block (LUT order)
             const float* angle_block = raw_ptr + (a * m_num_channels);
 
             for (uint32_t c = 0; c < m_num_channels; ++c) {
                 float val = angle_block[c];
-                if (val > max_val) {
+                if (val > max_val)
                     max_val = val;
-                }
             }
+
+            // At this point:
+            //   a = 0        -> mu = +1  (forward)
+            //   a = res - 1  -> mu = -1 (backward)
             envelope_data[a] = max_val;
         }
 
-        // 3. Orientation Fix (Keep consistent with your previous logic)
-        // If your file is 0->180, but Mitsuba is Forward->Back, we reverse.
+        // Flip to match ContinuousDistribution's domain [-1, 1]:
+        //   pdf[0]   = value at mu = -1 (backward)
+        //   pdf[last]= value at mu = +1 (forward)
         std::reverse(envelope_data.begin(), envelope_data.end());
 
-        // 4. Create the Distribution
+        // Create the angular sampling distribution over cos(theta) in [-1, 1]
         m_distr = ContinuousDistribution<Float>(
             ScalarVector2f(-1.f, 1.f),
             envelope_data.data(),
@@ -88,15 +92,18 @@ public:
 
         Float cos_theta = dot(wo, mi.wi);
 
-        Float u = (1.f - cos_theta) * 0.5f;
-
-        Float angle_idx = u * Float(m_resolution - 1);
+        // Map cosθ ∈ [-1,1] onto LUT index [0, m_resolution-1]
+        Float angle_idx = (1.f - cos_theta) * 0.5f * Float(m_resolution - 1);
         angle_idx = dr::clip(angle_idx, 0.f, ScalarFloat(m_resolution - 1));
 
-        // 3. Spectral Value
+        // Spectral phase value p(μ, λ)
         Spectrum value = lookup_interpolated(mi.wavelengths, angle_idx, active);
 
-        Float pdf = m_distr.eval_pdf(cos_theta);
+        // 1D pdf over μ (normalized)
+        Float pdf_mu = m_distr.eval_pdf_normalized(cos_theta, active);
+
+        // Convert to solid-angle pdf: uniform in φ
+        Float pdf = pdf_mu * dr::rcp(2.f * dr::Pi<ScalarFloat>);
 
         return { value, pdf };
     }
@@ -108,32 +115,31 @@ public:
                                                  Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::PhaseFunctionSample, active);
 
-        // 1. Sample cos_theta from Green Distribution
+        // 1. Sample cos_theta from angular envelope distribution over [-1,1]
         Float cos_theta = m_distr.sample(sample2.x());
 
-        // 2. Compute Local Direction
+        // 2. Compute local/world direction (unchanged)
         Float sin_theta = dr::safe_sqrt(1.f - cos_theta * cos_theta);
         auto [sin_phi, cos_phi] = dr::sincos(2.f * dr::Pi<ScalarFloat> * sample2.y());
 
         Vector3f wo_local { sin_theta * cos_phi, sin_theta * sin_phi, cos_theta };
-
-        // 3. FRAME CORRECTION (CRITICAL)
-        // We must transform wo_local to world space relative to the INCOMING RAY (mi.wi).
-        // This aligns the "Forward" peak (Z+) with the light direction.
-        // Frame3f(vector) constructs a frame where 'vector' is the Z axis.
         Vector3f wo = Frame3f(mi.wi).to_world(wo_local);
 
-        Float u = (1.f - cos_theta) * 0.5f;
-        Float angle_idx = u * Float(m_resolution - 1);
+        // 3. Map cosθ to LUT index according to generator convention
+        Float angle_idx = (1.f - cos_theta) * 0.5f * Float(m_resolution - 1);
         angle_idx = dr::clip(angle_idx, 0.f, ScalarFloat(m_resolution - 1));
 
+        // 4. Lookup spectral phase value p(μ, λ)
         Spectrum value = lookup_interpolated(mi.wavelengths, angle_idx, active);
 
-        Float pdf = m_distr.eval_pdf(cos_theta);
+        // 5. 1D pdf over μ from ContinuousDistribution (normalized)
+        Float pdf_mu = m_distr.eval_pdf_normalized(cos_theta, active);
+
+        // Convert to solid-angle pdf: p_sample(ω) = pdf_mu / (2π)
+        Float pdf = pdf_mu * dr::rcp(2.f * dr::Pi<ScalarFloat>);
 
         Spectrum weight = value / pdf;
-        dr::masked(weight, pdf == 0.f) = 0.f;
-
+        
         return { wo, weight, pdf };
     }
 
