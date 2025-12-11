@@ -1,6 +1,5 @@
 import os
-import hashlib
-from .generate import generate_mie_table, save_binary_file
+from python.atmospheric.generator.generate import generate_mie_table, save_binary_file
 from .config import MieConfig
 
 def _get_cache_path(config: MieConfig, cache_dir="cache"):
@@ -50,5 +49,7 @@ def create_atmospheric_phase(radius_mean_um=2.0, radius_std_um=0.5,
     # The C++ plugin expects a string param named 'filename'
     return {
         'type': 'atmosphericphase',
-        'filename': file_path
+        'filename': file_path,
+        'use_mis' : False
+
     }

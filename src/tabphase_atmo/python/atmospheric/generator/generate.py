@@ -8,7 +8,8 @@ import struct
 from scipy import stats
 from joblib import Parallel, delayed
 import multiprocessing
-from .config import MieConfig
+from .lobe_analyzer import analyze_lut_for_mis,write_mis_metadata
+from python.atmospheric.config import MieConfig
 
 def get_water_ior(wavelength_nm): #Sellmeier
     w_um = wavelength_nm / 1000.0
@@ -103,4 +104,28 @@ def save_binary_file(filename, phase_table, config: MieConfig):
 
         f.write(data_flat.tobytes())
 
-    print(f"Saved binary: {filename}")
+    print(f"[GEN] Saved binary: {filename}")
+
+    print(f"[GEN] Analyzing LUT for MIS metadata...")
+    mu_vals = np.linspace(1, -1, config.num_angles)
+    wavelengths = np.linspace(config.min_wavelength, config.max_wavelength, config.num_wavelengths)
+
+    # Analyze (phase_table is [num_wavelengths, num_angles])
+    lobes, weights = analyze_lut_for_mis(phase_table, mu_vals, wavelengths)
+
+    # Print detected lobes
+    print(f"[GEN] Detected {len(lobes)} lobes:")
+    for lobe in lobes:
+        lobe_type = ['Forward', 'Rainbow', 'Residual', 'Glory'][lobe['type']]
+        wl_dep = " (λ-dependent)" if lobe.get('wavelength_dependent', False) else ""
+        print(
+            f"[GEN]  - {lobe_type}{wl_dep}: mu={lobe['mu_center']:.3f}, κ={lobe['kappa']:.1f}, amp={lobe['amplitude']:.3e}")
+
+    print(
+        f"[GEN] Mixture weights: forward={weights['forward']:.3f}, rainbow={weights['rainbow']:.3f}, residual={weights['residual']:.3f}")
+
+    # Append MIS metadata to file
+    with open(filename, 'ab') as f:  # Append mode
+        write_mis_metadata(f, lobes, weights)
+
+    print(f"[GEN] MIS metadata appended to {filename}")
