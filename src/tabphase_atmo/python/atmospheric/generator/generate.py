@@ -3,30 +3,35 @@ generate.py
 Parallelized Mie scattering generator using MieConfig.
 """
 import numpy as np
-import miepython
 import struct
 from scipy import stats
 from joblib import Parallel, delayed
 import multiprocessing
-from .lobe_analyzer import analyze_lut_for_mis,write_mis_metadata
+
+from .lobe_analyzer import analyze_lut_for_mis, write_mis_metadata
+from .mie_backend import mie_unpolarized_intensity
 from python.atmospheric.config import MieConfig
 
-def get_water_ior(wavelength_nm): #Sellmeier
+
+def get_water_ior(wavelength_nm):  # Sellmeier
     w_um = wavelength_nm / 1000.0
     A = [5.666959820e-1, 1.731900098e-1, 2.026271125e-2, 1.139365864e-1]
-    B = [5.084151894e-3, 1.818488474e-2, 2.625439472e-2, 1.073842352e1] #daimon & masamura 2007
+    B = [5.084151894e-3, 1.818488474e-2, 2.625439472e-2, 1.073842352e1]  # daimon & masamura 2007
     n_squared = 1.0
     for i in range(4):
         n_squared += (A[i] * w_um**2) / (w_um**2 - B[i])
-    return complex(np.sqrt(n_squared), 0.0) #albedo is zero rn
+    return complex(np.sqrt(n_squared), 0.0)  # albedo is zero rn
+
 
 def _compute_lognormal_params(radius_mean_um, radius_std_um):
-    if radius_std_um <= 0: return np.log(radius_mean_um), 1e-10
+    if radius_std_um <= 0:
+        return np.log(radius_mean_um), 1e-10
     cv_squared = (radius_std_um / radius_mean_um) ** 2
     sigma_squared = np.log(1 + cv_squared)
     sigma = np.sqrt(sigma_squared)
     mu = np.log(radius_mean_um) - sigma_squared / 2.0
     return (mu, sigma)
+
 
 # --- Core Logic ---
 def process_wavelength(w_nm, index, radii, weights, mu, d_mu):
@@ -35,15 +40,16 @@ def process_wavelength(w_nm, index, radii, weights, mu, d_mu):
 
     for j, r in enumerate(radii):
         x = 2 * np.pi * r / (w_nm / 1000.0)
-        intensity = miepython.i_unpolarized(m, x, mu)
+        intensity = mie_unpolarized_intensity(m, x, mu)
         weighted_phase += weights[j] * intensity
 
     # Normalization (Energy Conservation)
     raw_integral = np.sum(weighted_phase) * d_mu * 2 * np.pi
-    normalized_phase = weighted_phase / (raw_integral + 1e-12) # Safety epsilon
+    normalized_phase = weighted_phase / (raw_integral + 1e-12)  # Safety epsilon
 
     print(f"  [Core] Finished {w_nm:.1f}nm | Raw Int: {raw_integral:.2f}")
     return index, normalized_phase.astype(np.float32)
+
 
 def generate_mie_table(config: MieConfig = MieConfig()):
     """
@@ -95,12 +101,11 @@ def save_binary_file(filename, phase_table, config: MieConfig):
 
     with open(filename, 'wb') as f:
         f.write(b'ATMPHASE')
-        f.write(struct.pack('<I', 1)) # Version
+        f.write(struct.pack('<I', 1))  # Version
         f.write(struct.pack('<I', config.num_angles))
         f.write(struct.pack('<I', config.num_wavelengths))
         f.write(struct.pack('<f', float(config.min_wavelength)))
         f.write(struct.pack('<f', float(config.max_wavelength)))
-
 
         f.write(data_flat.tobytes())
 
@@ -119,10 +124,12 @@ def save_binary_file(filename, phase_table, config: MieConfig):
         lobe_type = ['Forward', 'Rainbow', 'Residual', 'Glory'][lobe['type']]
         wl_dep = " (λ-dependent)" if lobe.get('wavelength_dependent', False) else ""
         print(
-            f"[GEN]  - {lobe_type}{wl_dep}: mu={lobe['mu_center']:.3f}, κ={lobe['kappa']:.1f}, amp={lobe['amplitude']:.3e}")
+            f"[GEN]  - {lobe_type}{wl_dep}: mu={lobe['mu_center']:.3f}, κ={lobe['kappa']:.1f}, amp={lobe['amplitude']:.3e}"
+        )
 
     print(
-        f"[GEN] Mixture weights: forward={weights['forward']:.3f}, rainbow={weights['rainbow']:.3f}, residual={weights['residual']:.3f}")
+        f"[GEN] Mixture weights: forward={weights['forward']:.3f}, rainbow={weights['rainbow']:.3f}, residual={weights['residual']:.3f}"
+    )
 
     # Append MIS metadata to file
     with open(filename, 'ab') as f:  # Append mode
