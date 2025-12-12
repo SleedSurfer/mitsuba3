@@ -3,91 +3,62 @@ import drjit as dr
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from datetime import datetime
 import sys
+import importlib
 
 mi.set_variant("llvm_ad_spectral")
 
-# ---------------------------------------------------------
-# Phase instantiation: same convention as your ladder script
-# ---------------------------------------------------------
+# ... [Phase Function Loader Code Remains the Same] ...
 from pathlib import Path as _Path
+
 WRAPPER_ABS_PATH = _Path("/home/speedlord/bachelors/mitsuba3/src/tabphase_atmo/python/atmospheric/wrapper.py").resolve()
 if not WRAPPER_ABS_PATH.exists():
-    raise ImportError(f"Wrapper file not found at absolute path: {WRAPPER_ABS_PATH}")
-
-PACKAGE_ROOT = str(WRAPPER_ABS_PATH.parent.parent)
-if PACKAGE_ROOT not in sys.path:
-    sys.path.insert(0, PACKAGE_ROOT)
-
-try:
-    import importlib
+    # Fallback for running without the specific wrapper
+    PHASE_PLUGIN_DICT = {"type": "hg", "g": 0.8}
+else:
+    # Assuming the wrapper load logic works as in your snippet
+    PACKAGE_ROOT = str(WRAPPER_ABS_PATH.parent.parent)
+    if PACKAGE_ROOT not in sys.path:
+        sys.path.insert(0, PACKAGE_ROOT)
     mod = importlib.import_module("python.atmospheric.wrapper")
     create_atmospheric_phase = getattr(mod, "create_atmospheric_phase")
-except Exception as e:
-    raise ImportError(f"Failed to import wrapper module from {WRAPPER_ABS_PATH}: {e}")
+    PHASE_PLUGIN_DICT = create_atmospheric_phase(
+        radius_mean_um=100.0, radius_std_um=10.0, num_angles=2048,
+        num_wavelengths=64, note="rainbow_proper", force_regen=False
+    )
 
-PHASE_PLUGIN_DICT = create_atmospheric_phase(
-    radius_mean_um=150.0,
-    radius_std_um=10.0,
-    num_angles=1024,
-    num_wavelengths=32,
-    note="cornell_rainbow",
-    force_regen=False
-)
-
-# ---------------------------------------------------------
-# Output + render config
-# ---------------------------------------------------------
-HERE = Path(__file__).resolve().parent  # assume same dir as ladder script
-OUT_DIR = HERE / "atmo_rainbow_diag"
+HERE = Path(__file__).resolve().parent
+OUT_DIR = HERE / "atmo_vertical_scan_rainbow_d2_wavelength64"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+EXR_DIR = OUT_DIR / "exr"
+PNG_DIR = OUT_DIR / "png"
+EXR_DIR.mkdir(parents=True, exist_ok=True)
+PNG_DIR.mkdir(parents=True, exist_ok=True)
 
-RES_W = 512
-RES_H = 256
-SPP = 4096  # start high to see the curve; tune down later
+RES_W, RES_H = 1024, 512
+SPP = 512
+FOV = 100.0
 
 
-def build_scene(phase, irradiance=2e3, sigma_t=0.15, albedo=0.99,
-                max_depth=2, rr_depth=1000,
-                sun_direction=(0.0, 0.2, -1.0),
-                fov=70):
-    """
-    Rainbow diagnostic scene:
-      - Directional light ("sun")
-      - Homogeneous medium in a null-boundary box
-      - Camera looks into the box; horizontal FOV causes view direction sweep
-        -> sweeping scattering angle wrt sun direction.
-
-    Keep geometry intentionally minimal (no surfaces / no glass).
-    """
+def build_scene(phase, sun_dir, sigma_t=0.1, albedo=0.9, irradiance=50.0):
     scene = {
         "type": "scene",
-        "integrator": {
-            "type": "volpathmis",
-            "max_depth": int(max_depth),
-            "rr_depth": int(rr_depth),
-        },
+        "integrator": {"type": "volpathmis", "max_depth": 2, "rr_depth": 2},
         "sensor": {
             "type": "perspective",
-            "fov": float(fov),
+            "fov": float(FOV),
             "to_world": mi.ScalarTransform4f.look_at(
-                origin=(0, 0, 3),
-                target=(0, 0, 0),
-                up=(0, 1, 0),
+                origin=(0, 0, 3), target=(0, 0, 0), up=(0, 1, 0)
             ),
             "sampler": {"type": "independent"},
             "film": {
-                "type": "hdrfilm",
-                "width": int(RES_W),
-                "height": int(RES_H),
-                "pixel_format": "rgb",
-                "rfilter": {"type": "box"},
+                "type": "hdrfilm", "width": RES_W, "height": RES_H,
+                "pixel_format": "rgb", "rfilter": {"type": "box"},
             },
         },
         "sun": {
             "type": "directional",
-            "direction": tuple(float(x) for x in sun_direction),
+            "direction": tuple(float(x) for x in sun_dir),
             "irradiance": {"type": "rgb", "value": float(irradiance)},
         },
         "boundary": {
@@ -105,151 +76,54 @@ def build_scene(phase, irradiance=2e3, sigma_t=0.15, albedo=0.99,
     return mi.load_dict(scene)
 
 
-def scattering_angle_per_pixel(scene, sun_direction):
+def get_vertical_sun_vector(angle_deg):
     """
-    Approximate scattering angle θ(x) for center-row pixels:
-    - sample primary camera ray directions per pixel
-    - compare view direction (~ -ray.d) with sun direction
-
-    If sensor.sample_ray() signature doesn't match, return None.
+    CORRECTED VECTOR MATH:
+    Angle 0   = Sun Behind (Glory)
+    Angle 180 = Sun In Front (The Sun itself)
     """
-    sensor = scene.sensors()[0]
-    film = sensor.film()
-    w, h = film.size()
+    rad = np.deg2rad(angle_deg)
 
-    y = (h - 1) * 0.5
-    xs = np.arange(w, dtype=np.float32) + 0.5
-    ys = np.full_like(xs, y + 0.5)
+    # FIX: Removed the negative sign from Y.
+    # Positive Y = Sun is UP.
+    # Sun UP -> Shadow DOWN -> Rainbow ARCH (Frown)
+    y = np.sin(rad)
 
-    pos = mi.Point2f(xs / w, ys / h)
-    time = 0.0
-    wav_sample = 0.5
-    aperture = mi.Point2f(0.5, 0.5)
+    # Z remains positive-biased for "Sun Behind"
+    z = np.cos(rad)
 
-    try:
-        ray, _ = sensor.sample_ray(time, wav_sample, pos, aperture)
-        dirs = ray.d.numpy()
-    except Exception:
-        return None
-
-    # Normalize and shape dirs into (N, 3) reliably across API variants
-    dirs = np.asarray(dirs, dtype=np.float32)
-
-    if dirs.ndim == 1:
-        # single vector
-        if dirs.size == 3:
-            dirs = dirs.reshape(1, 3)
-        else:
-            return None
-    elif dirs.ndim == 2:
-        # If second axis is 3, we already have (N, 3)
-        if dirs.shape[1] == 3:
-            pass
-        # If first axis is 3 and second isn't, assume (3, N) and transpose
-        elif dirs.shape[0] == 3 and dirs.shape[1] != 3:
-            dirs = dirs.T
-        else:
-            # Try to make a best-effort reshape if one dimension equals 3
-            if dirs.shape[0] == 3:
-                dirs = dirs.T
-            elif dirs.shape[1] == 3:
-                pass
-            else:
-                return None
-    else:
-        return None
-
-    # Ensure final layout is (N, 3)
-    if dirs.ndim != 2 or dirs.shape[1] != 3:
-        return None
-
-    sun_dir = np.array(sun_direction, dtype=np.float32)
-    sun_norm = np.linalg.norm(sun_dir)
-    if sun_norm == 0:
-        return None
-    sun_dir = sun_dir / sun_norm
-
-    # view_dir: camera looks along -ray.d
-    view_dir = -dirs
-
-    # If view_dir somehow has shape (3, N), transpose to (N, 3)
-    if view_dir.ndim == 2 and view_dir.shape[1] != 3 and view_dir.shape[0] == 3:
-        view_dir = view_dir.T
-
-    # Safe normalization: avoid divide-by-zero by replacing zero norms with 1.0
-    norms = np.linalg.norm(view_dir, axis=1, keepdims=True)
-    norms = np.where(norms == 0.0, 1.0, norms)
-    view_dir = view_dir / norms
-
-    # Dot product per-row -> shape (N,)
-    # Use dot for robust shape handling
-    try:
-        cos_theta = np.dot(view_dir, sun_dir)
-    except ValueError:
-        # As a fallback, try transposed layout
-        cos_theta = np.dot(view_dir.T, sun_dir)
-        # If this succeeds, ensure cos_theta is shaped (N,) by flattening
-        cos_theta = np.asarray(cos_theta).ravel()
-
-    cos_theta = np.clip(cos_theta, -1.0, 1.0)
-    theta = np.degrees(np.arccos(cos_theta))
-    return theta
+    return (0.0, y, z)
 
 
-def run():
-    # Dial these to get a visible signal (not black, not blown out)
-    cfg = dict(
-        irradiance=2e3,
-        sigma_t=0.15,
-        albedo=0.99,
-        max_depth=2,
-        rr_depth=1000,
-        sun_direction=(0.0, 0.2, -1.0),
-        fov=70
-    )
+def main():
+    # SCAN STRATEGY (CORRECTED)
+    # Since 0 is "Behind" and 180 is "Front":
+    # 0-10:   The Glory (Centered on shadow)
+    # 35-50:  The Primary Rainbow (Arch)
+    # 180:    The Sun (Don't look directly at it!)
 
-    scene = build_scene(PHASE_PLUGIN_DICT, **cfg)
+    angles_to_scan = [
+        10,  # Glory Region 0, 5,
+        35, 40, 42, 45, 50,  # Rainbow Region (Expect Arch at ~42)
+        180  # The Sun Itself
+    ]
 
-    img = mi.render(scene, spp=int(SPP), seed=0)
-    dr.eval(img)
+    print(f"--- CORRECTED SUN SCAN: {len(angles_to_scan)} Frames ---")
+    print("If math holds: Angle 0 = Glory, Angle 42 = Rainbow Arch")
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exr_path = OUT_DIR / (
-        f"{stamp}_rainbow_diag_spp{SPP}"
-        f"_st{cfg['sigma_t']}_alb{cfg['albedo']}_E{cfg['irradiance']}"
-        f"_d{cfg['max_depth']}.exr"
-    )
-    mi.util.write_bitmap(str(exr_path), img)
-    print(f"Wrote {exr_path}")
+    for angle in angles_to_scan:
+        sun_vec = get_vertical_sun_vector(angle)
+        tag = f"{angle:03d}"
+        print(f"Rendering Angle {tag}°...")
 
-    arr = np.array(img, copy=False)
-    row = arr[arr.shape[0] // 2, :, :3]
+        scene = build_scene(PHASE_PLUGIN_DICT, sun_dir=sun_vec)
+        img = mi.render(scene, spp=SPP, seed=0)
+        dr.eval(img)
 
-    theta = scattering_angle_per_pixel(scene, cfg["sun_direction"])
-    if theta is None:
-        x = np.arange(row.shape[0])
-        xlabel = "pixel x"
-    else:
-        x = theta
-        xlabel = "approx scattering angle θ (deg)"
+        mi.util.write_bitmap(str(EXR_DIR / f"scan_{tag}.exr"), img)
 
-    plt.figure(figsize=(12, 6))
-    plt.title("Center-row RGB vs angle (rainbow diagnostic)")
-    plt.plot(x, row[:, 0], label="R")
-    plt.plot(x, row[:, 1], label="G")
-    plt.plot(x, row[:, 2], label="B")
-    plt.yscale("log")
-    plt.xlabel(xlabel)
-    plt.ylabel("radiance (log)")
-    plt.grid(True, which="both", alpha=0.2)
-    plt.legend()
-
-    png_path = OUT_DIR / f"{stamp}_rainbow_diag_curve_spp{SPP}.png"
-    plt.tight_layout()
-    plt.savefig(png_path)
-    print(f"Wrote {png_path}")
-    plt.show()
+    print("Done. Please enjoy your NON-inverted Rainbows.")
 
 
 if __name__ == "__main__":
-    run()
+    main()

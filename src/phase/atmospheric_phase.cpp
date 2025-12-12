@@ -1,8 +1,6 @@
 #include <algorithm>
-#include <array>
 #include <cstring>
-#include <drjit/math.h> // REQUIRED for erfinv
-#include <mitsuba/core/distr_1d.h>
+#include <limits>
 #include <mitsuba/core/fresolver.h>
 #include <mitsuba/core/fstream.h>
 #include <mitsuba/core/properties.h>
@@ -13,6 +11,34 @@
 
 NAMESPACE_BEGIN(mitsuba)
 
+/**
+ * AtmosphericPhaseFunction (stripped LUT-only, JIT-safe, linear λ interpolation)
+ *
+ * This removes *all* MIS metadata / lobe logic and samples *directly from the LUT*.
+ *
+ * LUT contains phase p_ω(μ, λ) normalized such that:
+ *    ∫_{S^2} p_ω dω = ∫_{-1}^1 p_ω(μ) 2π dμ = 1    (per wavelength)
+ *
+ * Sampling scheme implemented here:
+ *  - Pick a "hero lane" j uniformly among Spectrum::Size lanes using sample1
+ *  - Use that lane's wavelength λ_j to define a 1D distribution over μ:
+ *      p_μ(μ | λ_j) = 2π * p_ω(μ | λ_j)
+ *    To get linear interpolation in wavelength, we build *two* discrete CDFs from the LUT bins
+ *    neighboring λ_j and mix them by t in [0,1].
+ *  - Sample μ by inverting the mixed CDF (binary search using dr::gather)
+ *  - Sample φ uniformly
+ *
+ * PDF returned:
+ *  - We return the *marginal* density of wo under the above sampling procedure:
+ *      p_ω(wo) = (1/N) Σ_{lane i} p_ω(wo | λ_i)
+ *    where p_ω(wo | λ_i) = p_μ(μ | λ_i) / (2π) and p_μ is the same mixed-λ distribution.
+ *
+ * Notes:
+ *  - This implementation is JIT-safe: no selecting C++ objects based on vector indices.
+ *  - Distributions are represented as buffers and accessed with dr::gather.
+ *  - Everything is discrete over the LUT μ grid (angles). We do linear interpolation
+ *    between the two neighboring μ bins during inversion + pdf evaluation.
+ */
 template <typename Float, typename Spectrum>
 class AtmosphericPhaseFunction final : public PhaseFunction<Float, Spectrum> {
 public:
@@ -21,29 +47,8 @@ public:
 
     using FloatStorage = DynamicBuffer<Float>;
 
-    enum class LobeType : uint8_t {
-        Forward  = 0,
-        Rainbow  = 1,
-        Residual = 2,
-        Glory    = 3
-    };
-
-    struct LobeDescriptor {
-        LobeType type;
-        bool wavelength_dependent;
-        float mu_center;
-        float kappa;
-        float amplitude;
-        float weight; // <--- ADDED: Baked weight for faster/safer access
-
-        FloatStorage mu_per_wavelength;
-        FloatStorage kappa_per_wavelength;
-        size_t grid_size = 0;
-    };
-
     AtmosphericPhaseFunction(const Properties &props) : Base(props) {
         m_filename = props.get<std::string>("filename");
-        m_use_mis  = props.get<bool>("use_mis", true);
 
         auto fs            = Thread::thread()->file_resolver();
         fs::path file_path = fs->resolve(m_filename);
@@ -51,350 +56,194 @@ public:
         if (!fs::exists(file_path))
             Throw("File not found: \"%s\"", m_filename);
 
-        std::unique_ptr<FileStream> fs_stream =
-            std::make_unique<FileStream>(file_path);
+        auto stream = std::make_unique<FileStream>(file_path);
 
-        // [Standard Header Reading Omitted for Brevity - kept same logic]
         char magic[8];
-        fs_stream->read(magic, 8);
-        // ... (Assume standard header reading is identical to your version) ...
-        // Re-implementing simplified header read for context:
-        uint32_t version;
-        fs_stream->read(&version, sizeof(uint32_t));
-        fs_stream->read(&m_resolution, sizeof(uint32_t));
-        fs_stream->read(&m_num_channels, sizeof(uint32_t));
-        fs_stream->read(&m_min_wavelength, sizeof(float));
-        fs_stream->read(&m_max_wavelength, sizeof(float));
+        stream->read(magic, 8);
+        if (memcmp(magic, "ATMPHASE", 8) != 0)
+            Throw("Invalid phase LUT file (bad magic), expected 'ATMPHASE': \"%s\"", m_filename);
 
-        size_t total_floats = m_resolution * m_num_channels;
+        uint32_t version;
+        stream->read(&version, sizeof(uint32_t));
+        stream->read(&m_resolution, sizeof(uint32_t));   // num_angles
+        stream->read(&m_num_channels, sizeof(uint32_t)); // num_wavelength bins
+        stream->read(&m_min_wavelength, sizeof(float));
+        stream->read(&m_max_wavelength, sizeof(float));
+
+        if (m_resolution < 2 || m_num_channels < 1)
+            Throw("Invalid LUT dimensions in \"%s\" (angles=%u, wavelengths=%u).",
+                  m_filename, m_resolution, m_num_channels);
+
+        size_t total_floats = (size_t) m_resolution * (size_t) m_num_channels;
         std::vector<float> host_data(total_floats);
-        fs_stream->read(host_data.data(), total_floats * sizeof(float));
+        stream->read(host_data.data(), total_floats * sizeof(float));
+
+        // LUT is stored as (angles, wavelengths) flattened, angle-major stride = m_num_channels.
+        // Keep device copy for fast eval lookup (your gather-based code).
         m_data = dr::load<FloatStorage>(host_data.data(), total_floats);
 
-        // Build envelope (Same as yours)
-        std::vector<float> envelope_data(m_resolution);
-        const float *raw_ptr = host_data.data();
-        for (uint32_t a = 0; a < m_resolution; ++a) {
-            float max_val            = 0.0f;
-            const float *angle_block = raw_ptr + (a * m_num_channels);
-            for (uint32_t c = 0; c < m_num_channels; ++c)
-                max_val = std::max(max_val, angle_block[c]);
-            envelope_data[a] = max_val;
-        }
-        std::reverse(envelope_data.begin(), envelope_data.end());
-        m_distr = ContinuousDistribution<Float>(
-            ScalarVector2f(-1.f, 1.f), envelope_data.data(), m_resolution);
+        // Build discrete p_mu tables and CDF per wavelength bin from the LUT:
+        //   p_mu[a] ∝ p_ω[a] * 2π   (but 2π cancels in normalization; we keep it explicit for clarity)
+        //
+        // IMPORTANT about ordering:
+        //   Generator mu grid: mu = linspace(1, -1, A), i.e. angle index 0 => mu=+1 (forward)
+        //   Our discrete sampler uses an array indexed by "mu index increasing from -1 to +1"
+        //   to match monotonic domain. Therefore we reverse the angle dimension.
+        //
+        // We'll create:
+        //   m_pdf_mu_bins: length = m_num_channels * m_resolution
+        //   m_cdf_mu_bins: length = m_num_channels * m_resolution
+        //
+        // where index = wl_bin * m_resolution + mu_idx, and mu_idx 0 => mu=-1, mu_idx A-1 => mu=+1.
+        std::vector<float> pdf_mu_host(total_floats);
+        std::vector<float> cdf_mu_host(total_floats);
 
-        // === Read MIS metadata ===
-        m_has_mis = false;
-        try {
-            char mis_magic[4];
-            size_t current_pos = fs_stream->tell();
-            if (fs_stream->size() - current_pos >= 4) {
-                fs_stream->read(mis_magic, 4);
-                if (memcmp(mis_magic, "MISD", 4) == 0) {
-                    read_mis_metadata(fs_stream.get());
-                    m_has_mis = true;
-                }
+        const float inv_two_pi = 1.f / (2.f * float(dr::Pi<double>)); // constant, used only as comment-guide
+        (void) inv_two_pi;
+
+        float d_mu = 2.f / float(m_resolution - 1);
+
+        for (uint32_t c = 0; c < m_num_channels; ++c) {
+            // Extract and reverse in mu so that mu_idx increases from -1 to +1.
+            // Original angle index a: 0..A-1 corresponds mu=+1..-1
+            // Reversed index r = (A-1 - a) corresponds mu=-1..+1
+            float sum = 0.f;
+            for (uint32_t r = 0; r < m_resolution; ++r) {
+                uint32_t a = (m_resolution - 1) - r;
+                float v_omega = host_data[(size_t) a * (size_t) m_num_channels + c];
+                v_omega = std::max(v_omega, 0.f);
+
+                // Convert to unnormalized density in mu; factor 2π cancels after normalization,
+                // but including it makes the intent explicit.
+                float v_mu = v_omega * (2.f * float(dr::Pi<double>));
+
+                pdf_mu_host[(size_t) c * (size_t) m_resolution + r] = v_mu;
+                sum += v_mu;
             }
-        } catch (const std::exception &e) {
-            Log(Warn, "Failed to read MIS metadata: %s", e.what());
-            m_has_mis = false;
+
+            // Normalize discretely in mu domain: sum(pdf_mu)*d_mu = 1  => pdf_mu /= (sum*d_mu)
+            float norm = sum * d_mu;
+            if (!(norm > 0.f))
+                norm = 1.f; // avoid division by zero; will become near-zero distribution
+
+            float cdf = 0.f;
+            for (uint32_t r = 0; r < m_resolution; ++r) {
+                float &p = pdf_mu_host[(size_t) c * (size_t) m_resolution + r];
+                p /= norm;
+                // CDF over continuous mu uses integral: accumulate p * d_mu
+                cdf += p * d_mu;
+                cdf_mu_host[(size_t) c * (size_t) m_resolution + r] = cdf;
+            }
+
+            // Force last entry exactly to 1 (helps numerical safety in inversion)
+            cdf_mu_host[(size_t) c * (size_t) m_resolution + (m_resolution - 1)] = 1.f;
         }
 
-        m_wavelength_scale =
-            (m_num_channels - 1) / (m_max_wavelength - m_min_wavelength);
+        m_pdf_mu_bins = dr::load<FloatStorage>(pdf_mu_host.data(), total_floats);
+        m_cdf_mu_bins = dr::load<FloatStorage>(cdf_mu_host.data(), total_floats);
+
+        m_inv_d_mu = 1.f / d_mu;
+
+        if (m_num_channels == 1) {
+            m_wavelength_scale = 0.f;
+        } else {
+            m_wavelength_scale =
+                (m_num_channels - 1) / (m_max_wavelength - m_min_wavelength);
+        }
+
         m_flags = +PhaseFunctionFlags::Anisotropic;
         m_components.push_back(m_flags);
     }
 
-    void read_mis_metadata(FileStream *fs) {
-        uint8_t version;
-        fs->read(&version, sizeof(uint8_t));
-        uint32_t num_components;
-        fs->read(&num_components, sizeof(uint32_t));
-
-        // Read raw weights temporarily
-        std::array<float, 3> temp_weights;
-        fs->read(temp_weights.data(), 3 * sizeof(float));
-        // Store for PDF/Selector usage if needed globally, but we will bake
-        // them
-        m_mixture_weights = temp_weights;
-
-        for (uint32_t i = 0; i < num_components; ++i) {
-            LobeDescriptor lobe;
-            uint8_t lobe_type, wl_dep;
-            uint16_t reserved;
-            fs->read(&lobe_type, sizeof(uint8_t));
-            lobe.type = static_cast<LobeType>(lobe_type);
-            fs->read(&wl_dep, sizeof(uint8_t));
-            lobe.wavelength_dependent = (wl_dep != 0);
-            fs->read(&reserved, sizeof(uint16_t));
-            fs->read(&lobe.mu_center, sizeof(float));
-            fs->read(&lobe.kappa, sizeof(float));
-            fs->read(&lobe.amplitude, sizeof(float));
-
-            // --- BAKE WEIGHT HERE ---
-            // Maps type 0->weight[0], type 1->weight[1], etc.
-            // Safe fallback if type is out of bounds (though it shouldn't be)
-            int type_idx = static_cast<int>(lobe.type);
-            if (type_idx >= 0 && type_idx < 3) {
-                lobe.weight = m_mixture_weights[type_idx];
-            } else {
-                lobe.weight = 0.0f;
-            }
-
-            uint32_t num_wl;
-            fs->read(&num_wl, sizeof(uint32_t));
-            lobe.grid_size = num_wl;
-
-            if (num_wl > 0) {
-                std::vector<float> host_mu(num_wl), host_kappa(num_wl);
-                fs->read(host_mu.data(), num_wl * sizeof(float));
-                fs->read(host_kappa.data(), num_wl * sizeof(float));
-                lobe.mu_per_wavelength =
-                    dr::load<FloatStorage>(host_mu.data(), num_wl);
-                lobe.kappa_per_wavelength =
-                    dr::load<FloatStorage>(host_kappa.data(), num_wl);
-            }
-            m_lobes.push_back(lobe);
-        }
-    }
-
-    // --- PDF EVALUATION ---
-    std::pair<Spectrum, Float> eval_pdf(const PhaseFunctionContext &ctx,
+    std::pair<Spectrum, Float> eval_pdf(const PhaseFunctionContext & /*ctx*/,
                                         const MediumInteraction3f &mi,
                                         const Vector3f &wo,
                                         Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::PhaseFunctionEvaluate, active);
 
-        Float cos_theta = dot(wo, mi.wi);
+        Float mu = dot(wo, mi.wi);
 
-        // 1. Evaluate True Phase Function Value (Lookup)
-        Float angle_idx = (1.f - cos_theta) * 0.5f * Float(m_resolution - 1);
+        // Truth
+        Float angle_idx = (1.f - mu) * 0.5f * Float(m_resolution - 1);
         angle_idx = dr::clip(angle_idx, 0.f, ScalarFloat(m_resolution - 1));
         Spectrum value = lookup_interpolated(mi.wavelengths, angle_idx, active);
 
-        // 2. Evaluate MIS PDF
-        Float pdf;
-        if (m_use_mis && m_has_mis) {
-            Float pdf_sum = 0.f;
-            // Loop over SIMD wavelengths
-            for (size_t w = 0; w < Spectrum::Size; ++w) {
-                Float wvl = mi.wavelengths[w];
-                pdf_sum += eval_mis_pdf_for_wvl(cos_theta, wvl, active);
-            }
-            pdf = pdf_sum / Float(Spectrum::Size);
-        } else {
-            Float pdf_mu = m_distr.eval_pdf_normalized(cos_theta, active);
-            pdf          = pdf_mu * dr::rcp(2.f * dr::Pi<ScalarFloat>);
+        // Sampling pdf (marginal over hero lane selection)
+        Float pdf_sum = 0.f;
+        for (size_t i = 0; i < Spectrum::Size; ++i) {
+            Float wvl = mi.wavelengths[i];
+            pdf_sum += pdf_omega_for_wavelength(mu, wvl, active);
         }
 
+        Float pdf = pdf_sum / Float(Spectrum::Size);
         return { value, pdf };
     }
 
-    // --- SAMPLING ---
     std::tuple<Vector3f, Spectrum, Float>
-    sample(const PhaseFunctionContext &ctx, const MediumInteraction3f &mi,
-           Float sample1, const Point2f &sample2, Mask active) const override {
+    sample(const PhaseFunctionContext & /*ctx*/,
+           const MediumInteraction3f &mi,
+           Float sample1, const Point2f &sample2,
+           Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::PhaseFunctionSample, active);
 
-        Float cos_theta;
+        // 1) Pick hero lane uniformly
+        UInt32 lane = dr::minimum(
+            dr::floor2int<UInt32>(sample1 * ScalarFloat(Spectrum::Size)),
+            UInt32(Spectrum::Size - 1)
+        );
 
-        if (m_use_mis && m_has_mis) {
-            cos_theta =
-                sample_mis(sample1, sample2.x(), mi.wavelengths, active);
-        } else {
-            cos_theta = m_distr.sample(sample2.x());
-        }
+        Float hero_wvl = 0.f;
+        for (uint32_t i = 0; i < Spectrum::Size; ++i)
+            hero_wvl = dr::select(lane == i, mi.wavelengths[i], hero_wvl);
 
-        // Standard direction reconstruction
-        Float sin_theta = dr::safe_sqrt(1.f - cos_theta * cos_theta);
+        // 2) Sample μ from mixed-λ CDF
+        Float mu = sample_mu_for_wavelength(hero_wvl, sample2.x(), active);
+
+        // 3) Sample φ uniformly
+        Float sin_theta = dr::safe_sqrt(1.f - mu * mu);
         auto [sin_phi, cos_phi] =
             dr::sincos(2.f * dr::Pi<ScalarFloat> * sample2.y());
-        Vector3f wo_local{ sin_theta * cos_phi, sin_theta * sin_phi,
-                           cos_theta };
+
+        Vector3f wo_local{ sin_theta * cos_phi,
+                           sin_theta * sin_phi,
+                           mu };
+
         Vector3f wo = Frame3f(mi.wi).to_world(wo_local);
 
-        // Recalculate PDF
-        Float angle_idx = (1.f - cos_theta) * 0.5f * Float(m_resolution - 1);
+        // 4) Truth + marginal pdf
+        Float angle_idx = (1.f - mu) * 0.5f * Float(m_resolution - 1);
         angle_idx = dr::clip(angle_idx, 0.f, ScalarFloat(m_resolution - 1));
         Spectrum value = lookup_interpolated(mi.wavelengths, angle_idx, active);
 
-        Float pdf;
-        if (m_use_mis && m_has_mis) {
-            Float pdf_sum = 0.f;
-            for (size_t w = 0; w < Spectrum::Size; ++w) {
-                Float wvl = mi.wavelengths[w];
-                pdf_sum += eval_mis_pdf_for_wvl(cos_theta, wvl, active);
-            }
-            pdf = pdf_sum / Float(Spectrum::Size);
-        } else {
-            Float pdf_mu = m_distr.eval_pdf_normalized(cos_theta, active);
-            pdf          = pdf_mu * dr::rcp(2.f * dr::Pi<ScalarFloat>);
+        Float pdf_sum = 0.f;
+        for (size_t i = 0; i < Spectrum::Size; ++i) {
+            Float wvl = mi.wavelengths[i];
+            pdf_sum += pdf_omega_for_wavelength(mu, wvl, active);
         }
 
-        Spectrum weight = value / pdf;
+        Float pdf = pdf_sum / Float(Spectrum::Size);
+        Spectrum weight = dr::select(pdf > 0.f, value / pdf, 0.f);
+
         return { wo, weight, pdf };
     }
 
-    // --- MIS SAMPLING LOGIC ---
-    Float sample_mis(Float lobe_sample, Float mu_sample, const Wavelength &wvls,
-                     Mask active) const {
-
-        // 1. Pick Hero Wavelength
-        UInt32 channel_idx = dr::minimum(
-            dr::floor2int<UInt32>(lobe_sample * ScalarFloat(Spectrum::Size)),
-            UInt32(Spectrum::Size - 1));
-        Float guide_wvl = 0.f;
-        for (uint32_t i = 0; i < Spectrum::Size; ++i) {
-            guide_wvl = dr::select(channel_idx == i, wvls[i], guide_wvl);
-        }
-
-        // Rescale for selector
-        Float rescaled_sample =
-            lobe_sample * ScalarFloat(Spectrum::Size) - Float(channel_idx);
-
-        // 2. Select Lobe via Cumulative Weights
-        // Using global weights for selection is fine, as long as they sum to 1
-        Float cumsum0 = m_mixture_weights[0];
-        Float cumsum1 = cumsum0 + m_mixture_weights[1];
-
-        Mask is_forward  = rescaled_sample < cumsum0;
-        Mask is_rainbow  = !is_forward && (rescaled_sample < cumsum1);
-        Mask is_residual = !is_forward && !is_rainbow;
-
-        Float cos_theta = 2.f * mu_sample - 1.f; // Default for residual
-
-        for (const auto &lobe : m_lobes) {
-            Mask use_this_lobe(false);
-            if (lobe.type == LobeType::Forward)
-                use_this_lobe = is_forward;
-            else if (lobe.type == LobeType::Rainbow)
-                use_this_lobe = is_rainbow;
-
-            if (dr::any_or<true>(use_this_lobe)) {
-                auto [mu_center, kappa] =
-                    get_lobe_params(lobe, guide_wvl, active);
-
-                Float sampled_mu =
-                    sample_truncated_gaussian(mu_sample, mu_center, kappa);
-                cos_theta = dr::select(use_this_lobe, sampled_mu, cos_theta);
-            }
-        }
-        return cos_theta;
-    }
-
-    // --- MIS PDF LOGIC ---
-    Float eval_mis_pdf_for_wvl(Float cos_theta, Float wvl, Mask active) const {
-        Float pdf_mixture(0.f);
-
-        for (const auto &lobe : m_lobes) {
-            Float weight = lobe.weight; // Use baked weight
-
-            if (lobe.type == LobeType::Residual) {
-                // Uniform PDF on [-1, 1] is 0.5
-                pdf_mixture += weight * 0.5f;
-            } else {
-                auto [mu_center, kappa] = get_lobe_params(lobe, wvl, active);
-                Float pdf_lobe =
-                    eval_truncated_gaussian_pdf(cos_theta, mu_center, kappa);
-                pdf_mixture += weight * pdf_lobe;
-            }
-        }
-        return pdf_mixture * dr::rcp(2.f * dr::Pi<ScalarFloat>);
-    }
-
-    // --- HELPER: Interpolate Lobe Parameters ---
-    std::pair<Float, Float> get_lobe_params(const LobeDescriptor &lobe,
-                                            Float wvl, Mask active) const {
-        Float mu_center = lobe.mu_center;
-        Float kappa     = lobe.kappa;
-
-        if (lobe.wavelength_dependent && lobe.grid_size > 0) {
-            Float wvl_idx = (wvl - m_min_wavelength) /
-                            (m_max_wavelength - m_min_wavelength);
-            wvl_idx = dr::clip(wvl_idx, 0.f, 1.f) * Float(lobe.grid_size - 1);
-
-            UInt32 idx0 = dr::floor2int<UInt32>(wvl_idx);
-            UInt32 idx1 = dr::minimum(idx0 + 1u, UInt32(lobe.grid_size - 1));
-            Float t     = wvl_idx - Float(idx0);
-
-            Float mu0 = dr::gather<Float>(lobe.mu_per_wavelength, idx0, active);
-            Float mu1 = dr::gather<Float>(lobe.mu_per_wavelength, idx1, active);
-            Float k0 =
-                dr::gather<Float>(lobe.kappa_per_wavelength, idx0, active);
-            Float k1 =
-                dr::gather<Float>(lobe.kappa_per_wavelength, idx1, active);
-
-            mu_center = dr::lerp(mu0, mu1, t);
-            kappa     = dr::lerp(k0, k1, t);
-        }
-        return { mu_center, kappa };
-    }
-
-    // --- MATH: TRUNCATED GAUSSIAN IMPLEMENTATION ---
-
-    // Normal CDF: Phi(x)
-    Float std_normal_cdf(Float x) const {
-        return 0.5f * (1.f + dr::erf(x * dr::InvSqrtTwo<ScalarFloat>));
-    }
-
-    // Inverse Normal CDF: Phi^-1(p)
-    Float std_normal_inv_cdf(Float p) const {
-        // Clamp p to avoid infinities
-        p = dr::clip(p, 1e-6f, 1.f - 1e-6f);
-        return dr::SqrtTwo<ScalarFloat> * dr::erfinv(2.f * p - 1.f);
-    }
-
-    Float sample_truncated_gaussian(Float u, Float mu, Float kappa) const {
-        Float sigma = dr::rsqrt(2.f * kappa + 1e-6f); // Safer epsilon
-
-        Float alpha = (-1.f - mu) / sigma;
-        Float beta  = (1.f - mu) / sigma;
-
-        Float Phi_alpha = std_normal_cdf(alpha);
-        Float Phi_beta  = std_normal_cdf(beta);
-        Float Z         = Phi_beta - Phi_alpha;
-
-        // If Z is too small (distribution strictly outside [-1, 1]), fallback
-        // to mu This handles extreme edge cases where the lobe drifts off the
-        // sphere. But for your rainbow (-0.787) and forward (1.0), this is
-        // safe.
-
-        Float p     = Phi_alpha + u * Z;
-        Float x_std = std_normal_inv_cdf(p);
-
-        Float result = mu + x_std * sigma;
-        return dr::clip(result, -1.f, 1.f);
-    }
-
-    Float eval_truncated_gaussian_pdf(Float x, Float mu, Float kappa) const {
-        // If x is outside [-1, 1], PDF is 0 (handled by caller implicitly
-        // usually, but good to know)
-        Float sigma    = dr::rsqrt(2.f * kappa + 1e-6f);
-        Float sigma_sq = sigma * sigma;
-
-        Float alpha = (-1.f - mu) / sigma;
-        Float beta  = (1.f - mu) / sigma;
-        Float Z     = std_normal_cdf(beta) - std_normal_cdf(alpha);
-
-        Float arg   = (x - mu) / sigma;
-        Float numer = dr::exp(-0.5f * arg * arg);
-        Float denom = sigma * dr::SqrtTwoPi<ScalarFloat> * Z;
-
-        return numer / denom;
-    }
-
     std::string to_string() const override {
-        return "AtmosphericPhaseFunction[]";
+        return tfm::format(
+            "AtmosphericPhaseFunction[LUT-only, JIT-safe]\n"
+            "  filename = \"%s\",\n"
+            "  resolution = %u,\n"
+            "  wavelength_bins = %u,\n"
+            "  wavelength_range_nm = [%f, %f]\n"
+            "]",
+            m_filename, m_resolution, m_num_channels,
+            m_min_wavelength, m_max_wavelength
+        );
     }
 
 private:
-    // [Private members unchanged]
+    // ---- LUT evaluation (unchanged from your code) ----
     Spectrum lookup_interpolated(const Wavelength &wvls, Float angle_idx,
                                  Mask active) const {
-        // ... (Keep your original implementation for this) ...
         if constexpr (is_spectral_v<Spectrum>) {
             Spectrum result;
             UInt32 a0        = dr::floor2int<UInt32>(angle_idx);
@@ -403,6 +252,7 @@ private:
             UInt32 stride    = UInt32(m_num_channels);
             UInt32 offset_a0 = a0 * stride;
             UInt32 offset_a1 = a1 * stride;
+
             constexpr size_t n_wavelengths = Spectrum::Size;
             for (size_t i = 0; i < n_wavelengths; ++i) {
                 Float wvl   = wvls[i];
@@ -411,12 +261,14 @@ private:
                 UInt32 w0   = dr::floor2int<UInt32>(w_idx);
                 UInt32 w1   = dr::minimum(w0 + 1u, UInt32(m_num_channels - 1));
                 Float t_wvl = w_idx - Float(w0);
-                Float v00   = dr::gather<Float>(m_data, offset_a0 + w0, active);
-                Float v01   = dr::gather<Float>(m_data, offset_a0 + w1, active);
-                Float v10   = dr::gather<Float>(m_data, offset_a1 + w0, active);
-                Float v11   = dr::gather<Float>(m_data, offset_a1 + w1, active);
-                result[i]   = dr::lerp(dr::lerp(v00, v01, t_wvl),
-                                       dr::lerp(v10, v11, t_wvl), t_angle);
+
+                Float v00 = dr::gather<Float>(m_data, offset_a0 + w0, active);
+                Float v01 = dr::gather<Float>(m_data, offset_a0 + w1, active);
+                Float v10 = dr::gather<Float>(m_data, offset_a1 + w0, active);
+                Float v11 = dr::gather<Float>(m_data, offset_a1 + w1, active);
+
+                result[i] = dr::lerp(dr::lerp(v00, v01, t_wvl),
+                                     dr::lerp(v10, v11, t_wvl), t_angle);
             }
             return result;
         } else {
@@ -424,16 +276,119 @@ private:
         }
     }
 
+    // ---- Wavelength -> (bin0, bin1, t) for linear interpolation ----
+    MI_INLINE std::tuple<UInt32, UInt32, Float> wl_to_bins(const Float &wvl) const {
+        if (m_num_channels == 1)
+            return { UInt32(0), UInt32(0), 0.f };
+
+        Float x = (wvl - m_min_wavelength) * m_wavelength_scale;
+        x = dr::clip(x, 0.f, ScalarFloat(m_num_channels - 1));
+
+        UInt32 i0 = dr::floor2int<UInt32>(x);
+        UInt32 i1 = dr::minimum(i0 + 1u, UInt32(m_num_channels - 1));
+        Float t   = x - Float(i0);
+        return { i0, i1, t };
+    }
+
+    // ---- Evaluate pdf_omega(wo | wavelength) using mixed-λ discrete pdf_mu ----
+    MI_INLINE Float pdf_omega_for_wavelength(const Float &mu, const Float &wvl, Mask active) const {
+        // Convert mu in [-1,1] to discrete mu-index in [0, A-1] where index 0 => mu=-1.
+        // mu_idx_f = (mu + 1)/2 * (A-1)
+        Float mu_idx_f = (mu + 1.f) * 0.5f * Float(m_resolution - 1);
+        mu_idx_f = dr::clip(mu_idx_f, 0.f, ScalarFloat(m_resolution - 1));
+
+        UInt32 m0 = dr::floor2int<UInt32>(mu_idx_f);
+        UInt32 m1 = dr::minimum(m0 + 1u, UInt32(m_resolution - 1));
+        Float tm  = mu_idx_f - Float(m0);
+
+        auto [b0, b1, tw] = wl_to_bins(wvl);
+
+        UInt32 base0 = b0 * UInt32(m_resolution);
+        UInt32 base1 = b1 * UInt32(m_resolution);
+
+        Float p00 = dr::gather<Float>(m_pdf_mu_bins, base0 + m0, active);
+        Float p01 = dr::gather<Float>(m_pdf_mu_bins, base0 + m1, active);
+        Float p10 = dr::gather<Float>(m_pdf_mu_bins, base1 + m0, active);
+        Float p11 = dr::gather<Float>(m_pdf_mu_bins, base1 + m1, active);
+
+        Float p0 = dr::lerp(p00, p01, tm);
+        Float p1 = dr::lerp(p10, p11, tm);
+        Float p_mu = dr::lerp(p0, p1, tw);
+
+        // Convert back to solid-angle density: p_omega = p_mu / (2π)
+        return p_mu * dr::rcp(2.f * dr::Pi<ScalarFloat>);
+    }
+
+    // ---- Sample mu from mixed-λ CDF by inversion (binary search) ----
+    MI_INLINE Float sample_mu_for_wavelength(const Float &wvl, const Float &u, Mask active) const {
+        auto [b0, b1, tw] = wl_to_bins(wvl);
+
+        UInt32 base0 = b0 * UInt32(m_resolution);
+        UInt32 base1 = b1 * UInt32(m_resolution);
+
+        // Binary search for smallest idx such that CDF(idx) >= u.
+        UInt32 lo = 0u;
+        UInt32 hi = UInt32(m_resolution - 1);
+
+        // resolution is 1024..4096, so 12 iterations is enough for <=4096
+        // (works for any power-of-two-ish but also fine generally).
+        for (int it = 0; it < 12; ++it) {
+            UInt32 mid = (lo + hi) >> 1;
+
+            Float c0 = dr::gather<Float>(m_cdf_mu_bins, base0 + mid, active);
+            Float c1 = dr::gather<Float>(m_cdf_mu_bins, base1 + mid, active);
+            Float c  = dr::lerp(c0, c1, tw);
+
+            Mask go_left = active && (u <= c);
+            hi = dr::select(go_left, mid, hi);
+            lo = dr::select(go_left, lo, mid + 1u);
+        }
+
+        UInt32 idx = dr::minimum(lo, UInt32(m_resolution - 1));
+
+        // Interpolate within the bin using local linear CDF segment.
+        UInt32 idx0 = dr::select(idx > 0u, idx - 1u, 0u);
+        UInt32 idx1 = idx;
+
+        Float c0a = dr::gather<Float>(m_cdf_mu_bins, base0 + idx0, active);
+        Float c0b = dr::gather<Float>(m_cdf_mu_bins, base0 + idx1, active);
+        Float c1a = dr::gather<Float>(m_cdf_mu_bins, base1 + idx0, active);
+        Float c1b = dr::gather<Float>(m_cdf_mu_bins, base1 + idx1, active);
+
+        Float Ca = dr::lerp(c0a, c1a, tw);
+        Float Cb = dr::lerp(c0b, c1b, tw);
+
+        // Avoid division by zero if segment is flat
+        Float denom = dr::maximum(Cb - Ca, 1e-12f);
+        Float s = (u - Ca) / denom;
+        s = dr::clip(s, 0.f, 1.f);
+
+        // Convert index-space to mu in [-1,1]
+        // mu_idx_f = idx0 + s
+        Float mu_idx_f = Float(idx0) + s;
+
+        // mu = 2*(mu_idx_f/(A-1)) - 1
+        Float mu = dr::fmadd(mu_idx_f, 2.f / Float(m_resolution - 1), -1.f);
+        return dr::clip(mu, -1.f, 1.f);
+    }
+
     MI_DECLARE_CLASS(AtmosphericPhaseFunction)
 
+private:
+    // LUT table for truth evaluation (angle-major storage)
     FloatStorage m_data;
-    ContinuousDistribution<Float> m_distr;
+
+    // Discrete distributions in mu-domain (mu_idx 0 => mu=-1, last => mu=+1)
+    FloatStorage m_pdf_mu_bins; // length = channels * resolution, normalized so ∑ p_mu*d_mu = 1
+    FloatStorage m_cdf_mu_bins; // length = channels * resolution, last is 1
+
     std::string m_filename;
-    uint32_t m_resolution, m_num_channels;
-    float m_min_wavelength, m_max_wavelength, m_wavelength_scale;
-    bool m_use_mis, m_has_mis;
-    std::vector<LobeDescriptor> m_lobes;
-    std::array<float, 3> m_mixture_weights;
+    uint32_t m_resolution = 0;
+    uint32_t m_num_channels = 0;
+    float m_min_wavelength = 0.f;
+    float m_max_wavelength = 0.f;
+    float m_wavelength_scale = 0.f;
+    float m_inv_d_mu = 0.f;
 };
 
 MI_EXPORT_PLUGIN(AtmosphericPhaseFunction)

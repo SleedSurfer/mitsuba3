@@ -50,6 +50,4 @@ def create_atmospheric_phase(radius_mean_um=2.0, radius_std_um=0.5,
     return {
         'type': 'atmosphericphase',
         'filename': file_path,
-        'use_mis' : False
-
     }
