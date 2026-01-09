@@ -6,11 +6,10 @@ Performs integrity checks and specialized plotting without altering generation l
 import numpy as np
 import matplotlib.pyplot as plt
 import sys
-import os
 
 # Import your existing loader
 try:
-    from visualize import load_binary_file
+    from python.atmospheric.generator.visualize import load_binary_file
 except ImportError:
     print("CRITICAL: Could not import 'load_binary_file' from 'visualize.py'.")
     sys.exit(1)

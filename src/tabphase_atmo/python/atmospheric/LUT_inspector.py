@@ -74,5 +74,5 @@ def inspect_binary(filename):
 
 
 if __name__ == "__main__":
-    target_file = "../cache/150um_mean_10um_std_32bins_1024ang_cornell_rainbow.bin"
+    target_file = "../cache/miepython/150um_mean_10um_std_32bins_1024ang_cornell_rainbow.bin"
     inspect_binary(target_file)

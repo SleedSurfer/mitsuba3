@@ -9,7 +9,7 @@ mi.set_variant('llvm_ad_spectral')
 # ---------------------------------------------------------
 # SETUP
 # ---------------------------------------------------------
-PLUGIN_FILENAME = "/home/speedlord/bachelors/mitsuba3/src/tabphase_atmo/python/cache/150um_mean_10um_std_32bins_1024ang_cornell_rainbow.bin"
+PLUGIN_FILENAME = "/python/cache/miepython/150um_mean_10um_std_32bins_1024ang_cornell_rainbow.bin"
 
 
 def audit_math():
@@ -20,7 +20,6 @@ def audit_math():
         phase_func = mi.load_dict({
             'type': 'atmosphericphase',
             'filename': PLUGIN_FILENAME,
-            'use_mis' : False
         })
     except Exception as e:
         print(f"💀 FATAL: {e}")

@@ -9,7 +9,7 @@ mi.set_variant('llvm_ad_spectral')
 # ---------------------------------------------------------
 # SETUP: Point this to your generated .bin file
 # ---------------------------------------------------------
-PLUGIN_FILENAME = "cache/150um_mean_10um_std_32bins_1024ang_cornell_rainbow.bin"
+PLUGIN_FILENAME = "cache/miepython/150um_mean_10um_std_32bins_1024ang_cornell_rainbow.bin"
 RADIUS_UM = 20.0  # Just for labelling, logic comes from the bin file
 
 def hunt_fireflies():

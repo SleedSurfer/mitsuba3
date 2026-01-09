@@ -5,7 +5,7 @@ Validates the generator using the Config as the source of truth.
 import os
 from config import MieConfig
 from python.atmospheric.generator.generate import generate_mie_table, save_binary_file
-from visualize import visualize_binary_file
+from python.atmospheric.generator.visualize import visualize_binary_file
 
 def test_generation():
     print("=" * 60)
