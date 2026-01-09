@@ -6,7 +6,7 @@ from pathlib import Path
 
 mi.set_variant('llvm_ad_spectral')
 
-PLUGIN_FILENAME = Path("/home/speedlord/bachelors/mitsuba3/src/tabphase_atmo/python/cache/150um_mean_10um_std_32bins_1024ang_cornell_rainbow.bin")
+PLUGIN_FILENAME = Path("/python/cache/miepython/150um_mean_10um_std_32bins_1024ang_cornell_rainbow.bin")
 
 def make_wavelength_packet(nm: float):
     # Use the same approach as other tests in the repo: create a Spectrum

@@ -12,7 +12,7 @@ except Exception:
 
 mi.set_variant('llvm_ad_spectral')  # keep it simple for auditing
 
-PLUGIN_FILENAME = Path("/home/speedlord/bachelors/mitsuba3/src/tabphase_atmo/python/cache/150um_mean_10um_std_32bins_1024ang_cornell_rainbow.bin")
+PLUGIN_FILENAME = Path("/python/cache/miepython/150um_mean_10um_std_32bins_1024ang_cornell_rainbow.bin")
 
 
 def make_wavelength_packet(nm: float):
