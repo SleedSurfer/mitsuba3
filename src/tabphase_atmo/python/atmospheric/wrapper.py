@@ -77,7 +77,7 @@ def create_atmospheric_phase(
     force_regen=False,
     generate_heatmap=True,
     generate_polar=True,
-    backend="auto",
+    backend="mie",
     cache_dir="cache",
     x_mie_only=700.0, x_go_only=1600.0, hybrid_x0=800.0, hybrid_x1=1400.0
 ):

@@ -78,23 +78,8 @@ public:
         std::vector<float> host_data(total_floats);
         stream->read(host_data.data(), total_floats * sizeof(float));
 
-        // LUT is stored as (angles, wavelengths) flattened, angle-major stride = m_num_channels.
-        // Keep device copy for fast eval lookup (your gather-based code).
         m_data = dr::load<FloatStorage>(host_data.data(), total_floats);
 
-        // Build discrete p_mu tables and CDF per wavelength bin from the LUT:
-        //   p_mu[a] ∝ p_ω[a] * 2π   (but 2π cancels in normalization; we keep it explicit for clarity)
-        //
-        // IMPORTANT about ordering:
-        //   Generator mu grid: mu = linspace(1, -1, A), i.e. angle index 0 => mu=+1 (forward)
-        //   Our discrete sampler uses an array indexed by "mu index increasing from -1 to +1"
-        //   to match monotonic domain. Therefore we reverse the angle dimension.
-        //
-        // We'll create:
-        //   m_pdf_mu_bins: length = m_num_channels * m_resolution
-        //   m_cdf_mu_bins: length = m_num_channels * m_resolution
-        //
-        // where index = wl_bin * m_resolution + mu_idx, and mu_idx 0 => mu=-1, mu_idx A-1 => mu=+1.
         std::vector<float> pdf_mu_host(total_floats);
         std::vector<float> cdf_mu_host(total_floats);
 
@@ -104,9 +89,6 @@ public:
         float d_mu = 2.f / float(m_resolution - 1);
 
         for (uint32_t c = 0; c < m_num_channels; ++c) {
-            // Extract and reverse in mu so that mu_idx increases from -1 to +1.
-            // Original angle index a: 0..A-1 corresponds mu=+1..-1
-            // Reversed index r = (A-1 - a) corresponds mu=-1..+1
             float sum = 0.f;
             for (uint32_t r = 0; r < m_resolution; ++r) {
                 uint32_t a = (m_resolution - 1) - r;
