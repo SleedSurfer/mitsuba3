@@ -7,8 +7,6 @@ import sys
 import importlib
 
 mi.set_variant("llvm_ad_spectral")
-
-# ... [Phase Function Loader Code Remains the Same] ...
 from pathlib import Path as _Path
 
 WRAPPER_ABS_PATH = _Path("/home/speedlord/bachelors/mitsuba3/src/tabphase_atmo/python/atmospheric/wrapper.py").resolve()
@@ -28,7 +26,7 @@ else:
     )
 
 HERE = Path(__file__).resolve().parent
-OUT_DIR = HERE / "atmo_vertical_scan_rainbow_d2_wavelength64"
+OUT_DIR = HERE / "volpathmis_8192spp_rainbow_nosky_d2_wavelength64"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 EXR_DIR = OUT_DIR / "exr"
 PNG_DIR = OUT_DIR / "png"
@@ -36,14 +34,14 @@ EXR_DIR.mkdir(parents=True, exist_ok=True)
 PNG_DIR.mkdir(parents=True, exist_ok=True)
 
 RES_W, RES_H = 1024, 512
-SPP = 512
+SPP = 256
 FOV = 100.0
 
 
 def build_scene(phase, sun_dir, sigma_t=0.1, albedo=0.9, irradiance=50.0):
     scene = {
         "type": "scene",
-        "integrator": {"type": "volpathmis", "max_depth": 2, "rr_depth": 2},
+        "integrator": {"type": "volpathmis", "max_depth": 4, "rr_depth": 2},
         "sensor": {
             "type": "perspective",
             "fov": float(FOV),
@@ -78,29 +76,19 @@ def build_scene(phase, sun_dir, sigma_t=0.1, albedo=0.9, irradiance=50.0):
 
 def get_vertical_sun_vector(angle_deg):
     """
-    CORRECTED VECTOR MATH:
     Angle 0   = Sun Behind (Glory)
     Angle 180 = Sun In Front (The Sun itself)
     """
     rad = np.deg2rad(angle_deg)
 
-    # FIX: Removed the negative sign from Y.
-    # Positive Y = Sun is UP.
-    # Sun UP -> Shadow DOWN -> Rainbow ARCH (Frown)
     y = np.sin(rad)
 
-    # Z remains positive-biased for "Sun Behind"
     z = np.cos(rad)
 
     return (0.0, y, z)
 
 
 def main():
-    # SCAN STRATEGY (CORRECTED)
-    # Since 0 is "Behind" and 180 is "Front":
-    # 0-10:   The Glory (Centered on shadow)
-    # 35-50:  The Primary Rainbow (Arch)
-    # 180:    The Sun (Don't look directly at it!)
 
     angles_to_scan = [
         10,  # Glory Region 0, 5,
@@ -108,7 +96,7 @@ def main():
         180  # The Sun Itself
     ]
 
-    print(f"--- CORRECTED SUN SCAN: {len(angles_to_scan)} Frames ---")
+    print(f"--- SUN SCAN: {len(angles_to_scan)} Frames ---")
     print("If math holds: Angle 0 = Glory, Angle 42 = Rainbow Arch")
 
     for angle in angles_to_scan:
@@ -122,7 +110,7 @@ def main():
 
         mi.util.write_bitmap(str(EXR_DIR / f"scan_{tag}.exr"), img)
 
-    print("Done. Please enjoy your NON-inverted Rainbows.")
+    print("Done. EXRs saved in:", EXR_DIR)
 
 
 if __name__ == "__main__":

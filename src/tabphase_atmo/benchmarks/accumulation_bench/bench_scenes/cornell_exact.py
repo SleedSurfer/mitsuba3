@@ -1,33 +1,39 @@
 import mitsuba as mi
-import drjit as dr
-
-mi.set_variant('llvm_ad_spectral')
-
-from atmospheric import create_atmospheric_phase
+from ..utils import get_phase_plugin
 
 
-def render_cornell():
-    print("--- Rendering Cornell Box (The Rational Fix) ---")
+def get_scene(config):
+    """
+    Cornell Box with a spectral FogBox and a dielectric sphere.
+    Refactored for the accumulation bench.
+    """
 
-    # Keeping your custom mist, but noting that the original used isotropic.
-    # If this looks weird, switch to an isotropic phase function.
-    phase_mist = create_atmospheric_phase(
-        radius_mean_um=150.0,
-        radius_std_um=10.0,
-        num_angles=1024, num_wavelengths=32,
-        note="cornell_rainbow", force_regen=False
+    # --- PHASE & ATMOSPHERE ---
+    #Using your 1.2um "rain" droplet settings
+    phase_mist = get_phase_plugin(
+        radius_mean=0.2,
+        radius_std=0.03,
+        note="glory_020_003"
     )
+    # phase_mist = get_phase_plugin(
+    #     radius_mean=0.0,
+    #     radius_std=0.0,
+    #     num_angles=0,
+    #     num_wavelengths=0,
+    #     note="0"
+    # )
 
-    # Helper to ingest those raw XML matrices without headache
+    # Helper to ingest raw XML matrices
     def T(flat_list):
         return mi.ScalarTransform4f(mi.ScalarMatrix4f(flat_list))
 
-    scene_dict = {
+    # --- SCENE DICT ---
+    return {
         'type': 'scene',
         'integrator': {
             'type': 'volpathmis',
-            'max_depth': 6,
-            'rr_depth': 200
+            'max_depth': 1024,
+            'rr_depth': 10
         },
         'sensor': {
             'type': 'perspective',
@@ -39,15 +45,15 @@ def render_cornell():
                 0, 0, 0, 1
             ]),
             'sampler': {
-                'type': 'independent',
-                'sample_count': 4096
+                'type': 'ldsampler',
+                'sample_count': config['batch_size']
             },
             'film': {
                 'type': 'hdrfilm',
-                'width': 512,
-                'height': 512,
+                'width': config['res_w'],
+                'height': config['res_h'],
                 'pixel_format': 'rgb',
-                'rfilter': {'type': 'tent'}
+                'rfilter': {'type': 'box'}
             },
         },
 
@@ -58,11 +64,14 @@ def render_cornell():
         'LightBSDF': {'type': 'diffuse', 'reflectance': {'type': 'rgb', 'value': [0.0, 0.0, 0.0]}},
 
         'SphereBSDF': {
-            'type': 'dielectric',
+            'type': 'roughdielectric',
             'int_ior': 1.5,
-            'ext_ior': 1.0
+            'ext_ior': 1.0,
+            'distribution': 'ggx',
+            'alpha': 0.01,
         },
 
+        # --- GEOMETRY ---
         'Floor': {
             'type': 'rectangle',
             'to_world': mi.ScalarTransform4f.translate([0, 0, 0]).rotate([1, 0, 0], -90).scale(1),
@@ -89,7 +98,6 @@ def render_cornell():
             'bsdf': {'type': 'ref', 'id': 'LeftWallBSDF'}
         },
 
-        # --- SPHERE ---
         'Sphere': {
             'type': 'sphere',
             'radius': 0.3,
@@ -97,7 +105,7 @@ def render_cornell():
             'bsdf': {'type': 'ref', 'id': 'SphereBSDF'},
         },
 
-        # --- LIGHT: THE PINPOINT ---
+        # --- LIGHT ---
         'Light': {
             'type': 'rectangle',
             'to_world': T([
@@ -110,36 +118,23 @@ def render_cornell():
             'emitter': {
                 'type': 'area',
                 'radiance': {
-                    'type': 'rgb',
-                    'value': [541127, 381972, 127324]
+                    'type': 'spectrum',
+                    'value': 541127.0
                 }
             }
         },
 
-        #--- FOG BOX ---
+        # --- VOLUMETRIC FOG BOX ---
         'FogBox': {
             'type': 'cube',
             'to_world': mi.ScalarTransform4f.scale(2.5),
             'bsdf': {'type': 'null'},
             'interior': {
                 'type': 'homogeneous',
-                'sigma_t': 0.4,
+                'sigma_t': 0.8,
                 'albedo': 0.9,
-                'phase': phase_mist #{ 'type': 'hg', 'g': 0.9 }#
-
+                'sample_emitters': True,
+                'phase': phase_mist
             }
         }
     }
-
-    scene = mi.load_dict(scene_dict)
-    img = mi.render(scene)
-
-    #img = dr.clip(img, 0.0, 100.0)
-
-    filename = "cornell_exact_rain_baseline_256spp_32depth.exr"
-    mi.util.write_bitmap(filename, img)
-    print(f"Saved {filename}. OPEN IN TEV.")
-
-
-if __name__ == "__main__":
-    render_cornell()

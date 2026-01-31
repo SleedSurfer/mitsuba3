@@ -205,12 +205,23 @@ public:
 
 private:
     Spectrum lookup_interpolated(const Wavelength &wvls, Float angle_idx, Mask active) const {
-        // Keeps user's original logic for Raw Data lookup
         if constexpr (is_spectral_v<Spectrum>) {
             Spectrum result;
-            UInt32 a0        = dr::floor2int<UInt32>(angle_idx);
-            UInt32 a1        = dr::minimum(a0 + 1u, UInt32(m_resolution - 1));
+
+            // --- THE FIX: Precision Epsilon ---
+            // Adding a small nudge prevents floating point undershoot from
+            // flipping the floor() to the previous bin.
+            UInt32 a0        = dr::floor2int<UInt32>(angle_idx + 1e-6f);
+
+            // Clamp to prevent overflow if angle_idx was exactly m_resolution - 1
+            a0 = dr::minimum(a0, UInt32(m_resolution - 2));
+            UInt32 a1        = a0 + 1u;
+
+            // Use the original angle_idx for the lerp weight calculation
+            // or the nudged one to maintain bit-perfection with the floor.
             Float t_angle    = angle_idx - Float(a0);
+            // ----------------------------------
+
             UInt32 stride    = UInt32(m_num_channels);
             UInt32 offset_a0 = a0 * stride;
             UInt32 offset_a1 = a1 * stride;
@@ -220,8 +231,11 @@ private:
                 Float wvl   = wvls[i];
                 Float w_idx = (wvl - m_min_wavelength) * m_wavelength_scale;
                 w_idx = dr::clip(w_idx, 0.f, ScalarFloat(m_num_channels - 1));
-                UInt32 w0   = dr::floor2int<UInt32>(w_idx);
-                UInt32 w1   = dr::minimum(w0 + 1u, UInt32(m_num_channels - 1));
+
+                // Apply similar logic to wavelength if your LUT is also sensitive there
+                UInt32 w0   = dr::floor2int<UInt32>(w_idx + 1e-6f);
+                w0          = dr::minimum(w0, UInt32(m_num_channels - 2));
+                UInt32 w1   = w0 + 1u;
                 Float t_wvl = w_idx - Float(w0);
 
                 Float v00 = dr::gather<Float>(m_data, offset_a0 + w0, active);
@@ -236,6 +250,7 @@ private:
             return 0.f;
         }
     }
+
 
     MI_INLINE Float sample_theta_spectral(const Float &u, UInt32 w_int, Mask active) const {
         // Binary search on the CDF specific to channel 'w_int'
