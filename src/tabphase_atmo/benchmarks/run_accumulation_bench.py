@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 import mitsuba as mi
 
-# --- SETUP PATHS ---
+# --- SETUP PATHS -----
 # Add 'src' to path so we can import 'atmospheric'
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
