@@ -53,7 +53,7 @@ def get_scene(config):
         "sub_global_mist": cloud_medium,
         "integrator": {
             "type": "volpathmis",
-            "max_depth": -1,
+            "max_depth": 64,
         },
         "sensor": {
             "type": "perspective",
@@ -63,7 +63,7 @@ def get_scene(config):
             "far_clip": 1000.0,
             "medium": {"type": "ref", "id": "sub_global_mist"},
             "to_world": cam_transform,
-            "sampler": {"type": "ldsampler", "sample_count": config['batch_size']},
+            "sampler": {"type": "independent", "sample_count": config['batch_size']},
             "film": {
                 "type": "hdrfilm",
                 "width": config['res_w'],

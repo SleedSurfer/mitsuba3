@@ -61,14 +61,14 @@ def get_scene(config):
 
     scene_dict = {
         "type": "scene",
-        "integrator": {"type": "volpathmis", 'max_depth': -1},
+        "integrator": {"type": "volpathmis", 'max_depth': 12, 'rr_depth': 5},
         "my_global_fog": global_fog,
         "sensor": {
             "type": "perspective",
             "fov": 65.47,
             "to_world": cam_transform,
             "medium": {"type": "ref", "id": "my_global_fog"},
-            "sampler": {"type": "stratified", "sample_count": config['batch_size']},
+            "sampler": {"type": "independent", "sample_count": config['batch_size']},
             "film": {
                 "type": "hdrfilm",
                 "width": config['res_w'], "height": config['res_h'],
@@ -110,7 +110,7 @@ def get_scene(config):
             "type": "disk",
             "flip_normals": True,
             "to_world": make_disk_transform(mat),
-            "emitter": {"type": "area", "radiance": {"type": "irregular", "value": mercury_list}},
+            "emitter": {"type": "area", "radiance": {"type": "spectrum", "value": mercury_list}},
             "bsdf": {"type": "null"}
         }
 

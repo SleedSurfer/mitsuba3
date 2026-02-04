@@ -43,16 +43,13 @@ public:
         stream->read(&m_min_wavelength, sizeof(float));
         stream->read(&m_max_wavelength, sizeof(float));
 
-        // Read Raw Data (Angle x Wavelength interleaved)
+        //(Angle x Wavelength interleaved)
         size_t total_floats = (size_t) m_resolution * (size_t) m_num_channels;
         std::vector<float> host_data(total_floats);
         stream->read(host_data.data(), total_floats * sizeof(float));
 
-        // Upload Raw Data (Keep interleaved for lookup_interpolated)
         m_data = dr::load<FloatStorage>(host_data.data(), total_floats);
 
-        // --- PRECOMPUTE SPECTRAL CDFs ---
-        // Layout: [Channel][Angle] (SoA style) for easier binary search
         std::vector<float> cdf_host(total_floats, 0.f);
         std::vector<float> norm_factors_host(m_num_channels, 0.f);
 
@@ -82,16 +79,14 @@ public:
                 cdf_host[cdf_offset + i] = (float) integral;
             }
 
-            // Normalize this channel's CDF
             float norm = (float) integral;
             if (norm <= 0.f) norm = 1.f;
 
-            norm_factors_host[c] = norm; // Store integral for PDF evaluation
+            norm_factors_host[c] = norm;
 
             for (uint32_t i = 0; i < m_resolution; ++i)
                 cdf_host[cdf_offset + i] /= norm;
 
-            // Ensure strict 1.0 at the end
             cdf_host[cdf_offset + m_resolution - 1] = 1.f;
         }
 
@@ -121,33 +116,23 @@ public:
         Float angle_idx = theta * (Float(m_resolution - 1) * dr::InvPi<Float>);
         angle_idx = dr::clip(angle_idx, 0.f, ScalarFloat(m_resolution - 1));
 
-        // 1. Evaluate Raw Value (Interleaved Interpolation)
         Spectrum value = lookup_interpolated(mi.wavelengths, angle_idx, active);
 
-        // 2. Get Normalization Factor for this wavelength
         Float w_idx = (mi.wavelengths[0] - m_min_wavelength) * m_wavelength_scale;
         w_idx = dr::clip(w_idx, 0.f, ScalarFloat(m_num_channels - 1));
         UInt32 w_int = dr::round2int<UInt32>(w_idx);
 
         Float norm = dr::gather<Float>(m_pdf_norm, w_int, active);
 
-        // 3. Calculate PDF
-        // PDF must be a Float (probability density).
-        // If Spectrum is RGB, we usually average it or pick a channel.
-        // But for your Monochromatic mode, Spectrum is Float, so value[0] is valid.
-
         Float pdf = 0.f;
         if constexpr (is_spectral_v<Spectrum>) {
-             // For spectral modes (Mono or Multi-channel)
-             // We use the first component effectively because we track specific wavelengths
+             // For spectral modes (Mono channel)
              pdf = value[0] / norm;
         } else {
              // For RGB modes (scalar_rgb), 'value' is a Color<float, 3>
-             // We can't divide Color by Float to get a Float PDF directly in this context without averaging.
-             // But since you don't use RGB for physics, we return the luminance or mean.
              pdf = dr::mean(value) / norm;
         }
-
+        pdf *= dr::InvTwoPi<Float>;
         return { value, pdf };
     }
 
@@ -158,12 +143,10 @@ public:
            Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::PhaseFunctionSample, active);
 
-        // 1. Identify which channel CDF to use
         Float w_idx = (mi.wavelengths[0] - m_min_wavelength) * m_wavelength_scale;
         w_idx = dr::clip(w_idx, 0.f, ScalarFloat(m_num_channels - 1));
         UInt32 w_int = dr::round2int<UInt32>(w_idx);
 
-        // 2. Sample theta using THAT channel's CDF
         Float theta = sample_theta_spectral(sample2.x(), w_int, active);
 
         auto [sin_theta, cos_theta] = dr::sincos(theta);
@@ -173,11 +156,9 @@ public:
         Vector3f wo_local{ sin_theta * cos_phi, sin_theta * sin_phi, -mu };
         Vector3f wo = Frame3f(mi.wi).to_world(wo_local);
 
-        // 3. Evaluate Value (Interpolated)
         Float angle_idx = theta * (Float(m_resolution - 1) * dr::InvPi<Float>);
         Spectrum value = lookup_interpolated(mi.wavelengths, angle_idx, active);
 
-        // 4. Retrieve PDF
         Float norm = dr::gather<Float>(m_pdf_norm, w_int, active);
         Float pdf = 0.f;
 
@@ -186,8 +167,9 @@ public:
         } else {
              pdf = dr::mean(value) / norm;
         }
+        pdf *= dr::InvTwoPi<Float>;
 
-        return { wo, dr::select(pdf > 0.f, value / pdf, 0.f), pdf };
+        return { wo, Spectrum(1.f), pdf };
     }
 
     std::string to_string() const override {
@@ -208,19 +190,12 @@ private:
         if constexpr (is_spectral_v<Spectrum>) {
             Spectrum result;
 
-            // --- THE FIX: Precision Epsilon ---
-            // Adding a small nudge prevents floating point undershoot from
-            // flipping the floor() to the previous bin.
-            UInt32 a0        = dr::floor2int<UInt32>(angle_idx + 1e-6f);
+            UInt32 a0        = dr::floor2int<UInt32>(angle_idx + 1e-6f); //TODO better look at this later
 
-            // Clamp to prevent overflow if angle_idx was exactly m_resolution - 1
             a0 = dr::minimum(a0, UInt32(m_resolution - 2));
             UInt32 a1        = a0 + 1u;
 
-            // Use the original angle_idx for the lerp weight calculation
-            // or the nudged one to maintain bit-perfection with the floor.
             Float t_angle    = angle_idx - Float(a0);
-            // ----------------------------------
 
             UInt32 stride    = UInt32(m_num_channels);
             UInt32 offset_a0 = a0 * stride;
@@ -232,7 +207,6 @@ private:
                 Float w_idx = (wvl - m_min_wavelength) * m_wavelength_scale;
                 w_idx = dr::clip(w_idx, 0.f, ScalarFloat(m_num_channels - 1));
 
-                // Apply similar logic to wavelength if your LUT is also sensitive there
                 UInt32 w0   = dr::floor2int<UInt32>(w_idx + 1e-6f);
                 w0          = dr::minimum(w0, UInt32(m_num_channels - 2));
                 UInt32 w1   = w0 + 1u;
@@ -253,18 +227,13 @@ private:
 
 
     MI_INLINE Float sample_theta_spectral(const Float &u, UInt32 w_int, Mask active) const {
-        // Binary search on the CDF specific to channel 'w_int'
-
-        // Base offset for this wavelength in the CDF array
         UInt32 base_offset = w_int * UInt32(m_resolution);
 
         UInt32 lo = 0u;
         UInt32 hi = UInt32(m_resolution - 1);
 
-        // Standard Dr.Jit binary search
         for (int it = 0; it < 13; ++it) {
             UInt32 mid = (lo + hi) >> 1;
-            // Gather from base_offset + mid
             Float c = dr::gather<Float>(m_cdf, base_offset + mid, active);
             Mask go_left = active && (u <= c);
             hi = dr::select(go_left, mid, hi);
@@ -274,7 +243,6 @@ private:
         UInt32 idx = dr::minimum(lo, UInt32(m_resolution - 1));
         UInt32 idx0 = dr::select(idx > 0u, idx - 1u, 0u);
 
-        // Gather CDF values for interpolation
         Float c0 = dr::gather<Float>(m_cdf, base_offset + idx0, active);
         Float c1 = dr::gather<Float>(m_cdf, base_offset + idx, active);
 

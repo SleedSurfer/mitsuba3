@@ -9,11 +9,10 @@ def get_scene(config):
     """
 
     # --- PHASE & ATMOSPHERE ---
-    #Using your 1.2um "rain" droplet settings
     phase_mist = get_phase_plugin(
-        radius_mean=0.2,
-        radius_std=0.03,
-        note="glory_020_003"
+        radius_mean=0.09,
+        radius_std=0.00,
+        note="009_000"
     )
     # phase_mist = get_phase_plugin(
     #     radius_mean=0.0,
@@ -31,9 +30,8 @@ def get_scene(config):
     return {
         'type': 'scene',
         'integrator': {
-            'type': 'volpathmis',
-            'max_depth': 1024,
-            'rr_depth': 10
+            'type': 'volpath',
+            'max_depth': -1,
         },
         'sensor': {
             'type': 'perspective',
@@ -45,7 +43,7 @@ def get_scene(config):
                 0, 0, 0, 1
             ]),
             'sampler': {
-                'type': 'ldsampler',
+                'type': 'independent',
                 'sample_count': config['batch_size']
             },
             'film': {
@@ -68,7 +66,7 @@ def get_scene(config):
             'int_ior': 1.5,
             'ext_ior': 1.0,
             'distribution': 'ggx',
-            'alpha': 0.01,
+            'alpha': 0.07,
         },
 
         # --- GEOMETRY ---
@@ -98,12 +96,12 @@ def get_scene(config):
             'bsdf': {'type': 'ref', 'id': 'LeftWallBSDF'}
         },
 
-        'Sphere': {
-            'type': 'sphere',
-            'radius': 0.3,
-            'center': [-0.22827, 1.2, 0.152505],
-            'bsdf': {'type': 'ref', 'id': 'SphereBSDF'},
-        },
+        # 'Sphere': {
+        #     'type': 'sphere',
+        #     'radius': 0.3,
+        #     'center': [-0.22827, 1.2, 0.152505],
+        #     'bsdf': {'type': 'ref', 'id': 'SphereBSDF'},
+        # },
 
         # --- LIGHT ---
         'Light': {
@@ -118,8 +116,8 @@ def get_scene(config):
             'emitter': {
                 'type': 'area',
                 'radiance': {
-                    'type': 'spectrum',
-                    'value': 541127.0
+                    'type': 'rgb',
+                    'value': [x*1.5 for x in [360000.0, 300000.0, 280000.0]]
                 }
             }
         },
@@ -131,8 +129,8 @@ def get_scene(config):
             'bsdf': {'type': 'null'},
             'interior': {
                 'type': 'homogeneous',
-                'sigma_t': 0.8,
-                'albedo': 0.9,
+                'sigma_t': 0.35,
+                'albedo': 0.95,
                 'sample_emitters': True,
                 'phase': phase_mist
             }
