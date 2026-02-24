@@ -1,11 +1,5 @@
 """
 generate.py
-"Zero-Process" Edition.
-- Angle-Space Grid (Theta) for resolution.
-- NO Super-Sampling (Single sample per bin).
-- NO Smoothing.
-- NO Floor.
-- NO Spectral Blending.
 """
 import numpy as np
 import struct

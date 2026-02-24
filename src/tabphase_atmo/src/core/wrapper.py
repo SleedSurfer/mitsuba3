@@ -88,6 +88,7 @@ def create_atmospheric_phase(
         generate_polar=True,
         backend="auto",  # Default to smart selection
         cache_dir="cache",
+
         # Tuning params for the Hybrid switch
         x_mie_only=700.0,
         x_go_only=1400.0,

@@ -1,6 +1,7 @@
 import mitsuba as mi
 import numpy as np
 from pathlib import Path
+import scipy.ndimage as nd
 
 # --- PATH LOGIC ---
 # Go up: utils -> core -> atmospheric -> src -> PROJECT_ROOT
@@ -71,15 +72,34 @@ def make_disk_transform(flat_matrix):
     return mi.ScalarTransform4f([flat_matrix[i:i + 4] for i in range(0, 16, 4)])
 
 
-def generate_cloud_grid(res=32, seed=1337, contrast=2.5, fine_amp=0.2, scale=0.3, density=1.0, base=0.05, clamp=None):
+def generate_cloud_grid(res=64, seed=1337, radius=0.45, density_multiplier=50.0):
     rng = np.random.default_rng(seed)
-    raw_noise = rng.random((res, res, res))
-    contrast_noise = np.power(raw_noise, contrast)
-    fine_noise = rng.random((res, res, res)) * fine_amp
-    combined = contrast_noise * 0.8 + fine_noise * 0.2
 
-    d = combined * scale * density + base
-    if clamp is not None:
-        d = np.minimum(d, clamp)
+    # 1. Create a 3D coordinate grid from 0.0 to 1.0
+    grid_1d = np.linspace(0, 1, res)
+    X, Y, Z = np.meshgrid(grid_1d, grid_1d, grid_1d, indexing='ij')
 
-    return mi.VolumeGrid(mi.TensorXf(d))
+    # 2. Mathematical Sculpting: Distance from the center (0.5, 0.5, 0.5)
+    dist_from_center = np.sqrt((X - 0.5) ** 2 + (Y - 0.5) ** 2 + (Z - 0.5) ** 2)
+
+    # Create a soft sphere (1.0 in the middle, fading to 0.0 at 'radius')
+    base_shape = np.clip((radius - dist_from_center) / radius, 0, 1)
+
+    # 3. The "Fluff": Generate low-resolution noise and blur it up
+    noise_res = res // 4  # Smaller grid = bigger cloud chunks
+    raw_noise = rng.random((noise_res, noise_res, noise_res))
+
+    # Cubic interpolation to make the noise smooth and wavy
+    smooth_noise = nd.zoom(raw_noise, res / noise_res, order=3)
+    smooth_noise = np.clip(smooth_noise, 0, 1)
+    # 4. Carve the cloud: Subtract the noise from the sphere's edges
+    # We multiply the noise to make the "bites" taken out of the cloud deeper
+    cloud_density = base_shape - (smooth_noise * 0.6)
+
+    # Chop off the negative values, leaving only the dense fluffy bits
+    cloud_density = np.clip(cloud_density, 0, 1)
+
+    # Scale it up so it's thick enough to actually scatter the light
+    cloud_density *= density_multiplier
+
+    return mi.VolumeGrid(mi.TensorXf(cloud_density))

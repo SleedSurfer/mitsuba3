@@ -92,6 +92,7 @@ public:
 
         m_cdf = dr::load<FloatStorage>(cdf_host.data(), total_floats);
         m_pdf_norm = dr::load<FloatStorage>(norm_factors_host.data(), m_num_channels);
+        dr::eval(m_data, m_cdf, m_pdf_norm);
 
         if (m_num_channels == 1) {
             m_wavelength_scale = 0.f;

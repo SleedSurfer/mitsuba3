@@ -17,7 +17,7 @@ class MieConfig:
     min_wavelength: float = 360.0 # Near-UV
     max_wavelength: float = 830.0 # Near-IR
 
-    num_samples: int = 50
+    num_samples: int = 128
     note: str = "mist" # Tag for the scenario
 
     @property
