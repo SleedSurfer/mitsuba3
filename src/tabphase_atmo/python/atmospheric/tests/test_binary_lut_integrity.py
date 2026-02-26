@@ -44,7 +44,7 @@ def _read_atmphase_file(path: Path):
 def test_lut_integrates_to_one_for_all_bins():
     data_dir = Path(__file__).resolve().parent.parent / "data"
     if not data_dir.exists():
-        pytest.skip("No data directory found; skipping LUT integration test")
+        pytest.skip("No data directory found; skipping LUT integration backend_tests")
 
     bin_files = list(data_dir.glob("*.bin"))
     if not bin_files:

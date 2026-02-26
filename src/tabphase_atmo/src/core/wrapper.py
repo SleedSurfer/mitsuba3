@@ -42,7 +42,7 @@ def _resolve_backend(name: str):
 
     # Geometric Optics (Large / Fast)
     if name in ("jit_traced", "drjit", "raytracer"):
-        return DrJitRaytracerBackend(num_rays=10_000_000)  # Default sensible ray count
+        return DrJitRaytracerBackend(grid_res=1024,particle_shape="sphere")  # Default sensible ray count
     # Hybrid (The Best of Both Worlds)
     if name in ("hybrid",):
         # Default hybrid config; usually overridden by auto logic
@@ -86,7 +86,7 @@ def create_atmospheric_phase(
         force_regen=False,
         generate_heatmap=True,
         generate_polar=True,
-        backend="auto",  # Default to smart selection
+        backend="auto",
         cache_dir="cache",
 
         # Tuning params for the Hybrid switch

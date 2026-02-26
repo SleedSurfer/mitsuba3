@@ -13,7 +13,7 @@ def render_cornell():
     #     radius_mean_um=10.0,
     #     radius_std_um=2.0,
     #     num_angles=1024, num_wavelengths=32,
-    #     note="test", force_regen=False
+    #     note="backend_tests", force_regen=False
     # )
     phase_mist = create_atmospheric_phase(
         radius_mean_um=150.0,

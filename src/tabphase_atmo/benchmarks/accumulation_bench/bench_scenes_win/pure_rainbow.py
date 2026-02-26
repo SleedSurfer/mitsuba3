@@ -17,11 +17,11 @@ def get_scene(config):
 
     cloud_medium = {
         "type": "heterogeneous",
-        "albedo": 1.0,
-        "phase": phase_dict, #{"type": "hg", "g": 0.6} # Mie scattering is REQUIRED for silver linings
+        "albedo": 0.98,
+        "phase": phase_dict,
         "sigma_t": {
             "type": "gridvolume",
-            "grid": generate_cloud_grid(res=64, density_multiplier=30.0, seed=123914),
+            "grid": generate_cloud_grid(res=64, density_multiplier=15.0, seed=123914),
             "to_world": base_transform,
             "filter_type": "trilinear"
         }
@@ -33,7 +33,8 @@ def get_scene(config):
         # 1. The Engine
         "integrator": {
             "type": "volpath",
-            "max_depth": 16,
+            "max_depth": 16#-1,
+            #"rr_depth": 99999
         },
 
         # 2. The Camera (Looking East)
@@ -63,8 +64,7 @@ def get_scene(config):
             "latitude": 49.1951,
             "longitude": 16.6068,
             "timezone": 1.0,
-            "year": 2026,
-            "month": 5,             # March
+            "month": 5,
             "day": 23,
             "hour": 6.5,           # 4:30 PM (Sun sets in the West, behind camera)
        },
@@ -85,7 +85,6 @@ def get_scene(config):
         # 5. The Cloud Container (Geometry Fixed)
         "cloud_bbox": {
             "type": "cube",
-            # We scale the [-1,1] cube down to [-0.5, 0.5], translate to [0, 1], THEN apply world transform
             "to_world": base_transform @ mi.ScalarTransform4f.translate([0.5, 0.5, 0.5]).scale(0.5),
             "interior": cloud_medium,
             "bsdf": {"type": "null"}

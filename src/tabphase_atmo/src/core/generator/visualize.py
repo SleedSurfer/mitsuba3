@@ -61,6 +61,7 @@ def visualize_binary_file(input_filename: str, output_image: str = None):
     else: plt.show()
     plt.close()
 
+
 def plot_polar_log(phase_table, num_angles, num_wavelengths, min_wl, max_wl, output_image=None):
     print("\n--- GENERATING POLAR PLOT ---")
 
@@ -70,46 +71,47 @@ def plot_polar_log(phase_table, num_angles, num_wavelengths, min_wl, max_wl, out
 
     fig, ax = plt.subplots(subplot_kw={'projection': 'polar'}, figsize=(10, 10))
 
-    # --- THE FIX: Auto-Scale based on BACK SCATTER only ---
-    # We ignore the first 10 degrees (Forward Peak) when calculating scale.
-    # This prevents the "Sun" from squishing the "Rainbow".
-    cutoff_idx = int(num_angles * (1.0 / 180.0))
+    # --- THE FIX: Full Scale, No Clipping ---
+    # Convert entire table to log to find the absolute true bounds
+    log_all_data = np.log10(phase_table + 1e-12)
 
-    # Get all data excluding the sun
-    data_no_sun = phase_table[:, cutoff_idx:]
-    log_data_no_sun = np.log10(data_no_sun + 1e-12)
+    # Floor: 1st percentile avoids the -12 math black holes
+    vis_min = np.percentile(log_all_data, 1) - 0.2
 
-    # Calculate limits from the "quiet" part of the sky
-    vis_min = np.percentile(log_data_no_sun, 1) # Floor
-    vis_max = np.max(log_data_no_sun) * 1.05    # Ceiling (Peak of the Glory)
+    # Ceiling: The actual peak of the forward scattering (The Sun)
+    vis_max = np.max(log_all_data) + 0.5
 
-    print(f"  [Vis] Scaling Range: {vis_min:.2f} to {vis_max:.2f} (Sun Ignored)")
+    print(f"  [Vis] Scaling Range: {vis_min:.2f} to {vis_max:.2f} (Sun Included)")
 
     indices_to_plot = [0, num_wavelengths // 2, num_wavelengths - 1]
     colors = ['blue', 'green', 'red']
-    labels = [f"{wavelengths[i]:.0f}nm" for i in indices_to_plot]
+    labels = [f"{wavelengths[i]:.0f} nm" for i in indices_to_plot]
 
     for idx, color, label in zip(indices_to_plot, colors, labels):
         intensity = phase_table[idx, :].astype(np.float64)
         log_intensity = np.log10(intensity + 1e-12)
 
-        # Hard Clip the data for plotting so the spike doesn't break the renderer
-        log_intensity = np.clip(log_intensity, vis_min, vis_max)
-
+        # Let the data fly, absolutely NO clipping
         ax.plot(theta, log_intensity, color=color, linewidth=1.5, label=label)
         ax.plot(-theta, log_intensity, color=color, linewidth=1.5, alpha=0.5)
 
     ax.set_theta_zero_location("N")
     ax.set_theta_direction(-1)
     ax.set_rlabel_position(45)
-    ax.set_ylim(vis_min, vis_max) # Enforce the limits
 
-    ax.set_title("Scattering Polar Plot (Log Radius)\n Sun Clipped to reveal Detail", va='bottom')
+
+    ax.set_rorigin(vis_min)
+
+    ax.set_ylim(vis_min, vis_max)
+
+    ax.set_title("Scattering Polar Plot (Log Radius)", va='bottom')
     ax.legend(loc='lower right')
     plt.tight_layout()
 
-    if output_image: plt.savefig(output_image, dpi=150, bbox_inches='tight')
-    else: plt.show()
+    if output_image:
+        plt.savefig(output_image, dpi=150, bbox_inches='tight')
+    else:
+        plt.show()
     plt.close()
 
 def visualize_polar_plot(input_filename: str, output_image: str | None = None):

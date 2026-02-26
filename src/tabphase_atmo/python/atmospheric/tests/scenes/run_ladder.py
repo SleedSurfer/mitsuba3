@@ -88,7 +88,7 @@ def T(flat_list):
 
 
 # --------------------------------------------------------------------
-# Minimal test scenes (do not inherit any content from your Cornell)
+# Minimal backend_tests scenes (do not inherit any content from your Cornell)
 # --------------------------------------------------------------------
 def make_scene_test1_directional_single_scatter_only(phase):
     """

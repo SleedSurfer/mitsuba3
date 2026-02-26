@@ -40,7 +40,7 @@ def audit_eval_pdf():
     mei = mi.MediumInteraction3f()
     mei.wi = wi
 
-    # Choose one wavelength to test
+    # Choose one wavelength to backend_tests
     test_nm = 550.0
     mei.wavelengths = make_wavelength_packet(test_nm)
 
@@ -49,7 +49,7 @@ def audit_eval_pdf():
     # Extract lane 0 of value for plotting/comparison
     value0 = value[0]
 
-    # Python reference evaluation (same test wavelength)
+    # Python reference evaluation (same backend_tests wavelength)
     cos_theta = dr.dot(wo, wi).numpy()
     ref = lookup_phase_reference(
         phase_table, cos_theta=cos_theta,

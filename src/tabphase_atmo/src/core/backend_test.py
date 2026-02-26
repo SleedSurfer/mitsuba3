@@ -27,24 +27,24 @@ def test_raytracer_explicit():
     # Large radius (1.5mm) to ensure Geometric Optics is valid.
     # Low std_dev to make the primary rainbow sharp.
     params = {
-        "radius_mean_um": 1500.0,  # 1.5mm (Huge drop)
-        "radius_std_um": 50.0,  # Very uniform size
-        "num_angles": 8192,  # High res to see the spike
-        "num_wavelengths": 64,  # Keep it fast
+        "radius_mean_um": 400.0,  # 1.5mm (Huge drop)
+        "radius_std_um": 20.0,  # Very uniform size
+        "num_angles": 1024,  # High res to see the spike
+        "num_wavelengths": 8,  # Keep it fast
         "backend": "jit_traced",  # <--- EXPLICIT CALL
         "force_regen": True,  # Force it to run
-        "note": "test_rt_fraunhofer"
+        "note": "test_rt_v3"
     }
 
     # params = {
     #         "radius_mean_um": 50.0,  # 1.5mm (Huge drop)
     #         "radius_std_um": 2.0,  # Very uniform size
-    #         "num_angles": 4192,  # High res to see the spike
+    #         "num_angles": 1024,  # High res to see the spike
     #         "num_wavelengths": 16,  # Keep it fast
     #         "backend": "jit_traced",  # <--- EXPLICIT CALL
     #         "force_regen": True,  # Force it to run
-    #         "note": "test_comparison"
-    #     }
+    #         "note": "test_small_droplets"
+    # }
 
     print(f"\n--- Invoking Wrapper with backend='{params['backend']}' ---")
 

@@ -34,7 +34,7 @@ def hunt_fireflies():
     # Dummy Interaction (Forward incident ray)
     wi = mi.Vector3f(0, 0, 1)
 
-    # We test just ONE wavelength (Green 550nm) to isolate geometric variance
+    # We backend_tests just ONE wavelength (Green 550nm) to isolate geometric variance
     # If your Green channel sampling is perfect, weights should be exactly 1.0 here.
     # If they aren't, your 'reverse' logic or distribution creation is slightly off.
     wavs = mi.Spectrum(550.0)

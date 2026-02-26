@@ -64,7 +64,7 @@ def save_fake_mie(filename, config):
         f.write(data_flat.tobytes())
 
     # Note: We skip the MIS metadata. Your C++ constructor provided earlier
-    # stops reading after 'm_data', so appending it is unnecessary for the render test.
+    # stops reading after 'm_data', so appending it is unnecessary for the render backend_tests.
     print("[GEN] Saved successfully.")
 
 
