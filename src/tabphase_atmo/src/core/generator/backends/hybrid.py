@@ -30,14 +30,33 @@ class HybridBackend:
         self.x0 = float(x0)
         self.x1 = float(x1)
 
-    def intensity_unpolarized(self, m: complex, x: float, mu: np.ndarray) -> np.ndarray:
+    def intensity_unpolarized(self, m: complex, wavelength_nm: float, radius_um: float, mu: np.ndarray) -> np.ndarray:
+        # Calculate x internally just for the blending weight
+        wavelength_um = wavelength_nm / 1000.0
+        x = 2.0 * np.pi * radius_um / max(wavelength_um, 1e-12)
+
         w = _smoothstep(self.x0, self.x1, x)
 
         if w <= 0.0:
-            return self.low_backend.intensity_unpolarized(m, x, mu)
+            return self.low_backend.intensity_unpolarized(m, wavelength_nm, radius_um, mu)
         if w >= 1.0:
-            return self.high_backend.intensity_unpolarized(m, x, mu)
+            return self.high_backend.intensity_unpolarized(m, wavelength_nm, radius_um, mu)
 
-        lo = self.low_backend.intensity_unpolarized(m, x, mu)
-        hi = self.high_backend.intensity_unpolarized(m, x, mu)
+        lo = self.low_backend.intensity_unpolarized(m, wavelength_nm, radius_um, mu)
+        hi = self.high_backend.intensity_unpolarized(m, wavelength_nm, radius_um, mu)
         return (1.0 - w) * lo + w * hi
+
+    def get_geometric_threshold(self, wavelength_nm: float) -> float:
+        """
+        Returns the radius (in microns) where Geometric Optics becomes active.
+        This is the radius where size parameter x >= x1 (full GO regime).
+
+        Args:
+            wavelength_nm: Wavelength in nanometers
+
+        Returns:
+            radius_um: Threshold radius in microns
+        """
+        wavelength_um = wavelength_nm / 1000.0
+        # x = 2π * r / λ → r = x * λ / (2π)
+        return self.x1 * wavelength_um / (2.0 * np.pi)

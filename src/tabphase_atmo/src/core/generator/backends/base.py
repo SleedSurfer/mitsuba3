@@ -12,20 +12,12 @@ class ScatteringBackend(Protocol):
 
     name: str
 
-    def intensity_unpolarized(self, m: complex, x: float, mu: np.ndarray) -> np.ndarray:
+    def intensity_unpolarized(self, m: complex, wavelength_nm: float, radius_um: float, mu: np.ndarray) -> np.ndarray:
         """
-        Parameters
-        ----------
-        m : complex
-            Relative refractive index.
-        x : float
-            Size parameter, x = 2*pi*r / lambda.
-        mu : np.ndarray
-            Cosine of scattering angle.
-
-        Returns
-        -------
-        np.ndarray
-            Unpolarized intensity aligned with mu.
+        Calculates the unpolarized scattering phase function.
+        m: Complex index of refraction
+        wavelength_nm: True wavelength in nanometers
+        radius_um: True particle radius in micrometers
+        mu: Cosine of scattering angles
         """
         ...

@@ -186,6 +186,12 @@ public:
         );
     }
 
+    void traverse(TraversalCallback *callback) override {
+        callback->put("data", m_data, +ParamFlags::Differentiable);
+        callback->put("cdf", m_cdf, +ParamFlags::Differentiable);
+        callback->put("pdf_norm", m_pdf_norm, +ParamFlags::Differentiable);
+    }
+
 private:
     Spectrum lookup_interpolated(const Wavelength &wvls, Float angle_idx, Mask active) const {
         if constexpr (is_spectral_v<Spectrum>) {

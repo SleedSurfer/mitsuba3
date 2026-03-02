@@ -6,24 +6,22 @@ from .base import ScatteringBackend
 from .geometric.particles.sphere import SphericalParticle
 from .geometric.ray_emitter import GridEmitter
 from .geometric.collector import CollectionSphere
+from .geometric.postprocess import apply_diffraction_smoothing, compute_fraunhofer_diffraction
 import copy
 
 
 class DrJitRaytracerBackend(ScatteringBackend):
     name: str = "drjit_raytracer"
 
-    def __init__(self, grid_res: int = 1000, particle_shape: str = "sphere"):
+    def __init__(self, grid_res: int = 3000, particle_shape: str = "sphere"):
         self._last_wavefronts = None  # DEBUG ONLY
         self.grid_res = grid_res
         self.particle_shape = particle_shape
 
-    def intensity_unpolarized(self, m: complex, x: float, mu: np.ndarray) -> np.ndarray:
+    def intensity_unpolarized(self, m: complex, wavelength_nm: float, radius_um: float, mu: np.ndarray) -> np.ndarray:
         # Derive physical radius from size parameter
         # x = 2πr/λ, using dummy λ = 0.5μm
-        dummy_lambda_um = 0.5
-        radius_um = (x * dummy_lambda_um) / (2.0 * np.pi)
         radius_mm = radius_um / 1000.0
-        wavelength_nm = dummy_lambda_um * 1000.0  # 500nm
 
         if self.particle_shape == "sphere":
             particle = SphericalParticle(radius_mm=radius_mm)
@@ -58,7 +56,11 @@ class DrJitRaytracerBackend(ScatteringBackend):
         p0_rays.Ex = active_rays.Ex * r_perp
         p0_rays.Ey = active_rays.Ey * r_para
         p0_rays.f = active_rays.f + particle.get_focal_crossings(0)
-        p0_rays.l = active_rays.l + 0.0
+
+        # FAR FIELD PHASE PROJECTION
+        far_field_l = active_rays.l - dr.dot(p0_rays.o, p0_rays.d)
+        p0_rays.l = far_field_l
+
         exiting_wavefronts.append((p0_rays, patches, "p=0"))
 
         # Branch B: Refract IN
@@ -85,7 +87,12 @@ class DrJitRaytracerBackend(ScatteringBackend):
             p_exit_rays.Ex = active_rays.Ex * t_perp
             p_exit_rays.Ey = active_rays.Ey * t_para
             p_exit_rays.f = active_rays.f + particle.get_focal_crossings(p)
-            p_exit_rays.l = active_rays.l + 0.0
+
+            # FAR FIELD PHASE PROJECTION
+            far_field_l = active_rays.l - dr.dot(p_exit_rays.o, p_exit_rays.d)
+            p_exit_rays.l = far_field_l
+
+
             exiting_wavefronts.append((p_exit_rays, patches, f"p={p}"))
 
             # Branch B: Reflect IN (Stay inside)
@@ -97,20 +104,42 @@ class DrJitRaytracerBackend(ScatteringBackend):
         self._last_wavefronts = exiting_wavefronts
 
         # --- COLLECTION ---
-        # Use a UNIFORM internal grid for collection (linear in μ from 1 to -1)
-        internal_bins = max(1024, len(mu) * 2)
-        mu_internal = np.linspace(1.0, -1.0, internal_bins)
+        # We need high resolution so sigma_bins > 1.0
+        internal_bins = 8192
 
-        collector = CollectionSphere(mu_bins=mu_internal, wavelength_nm=wavelength_nm)
+        # STRICTLY LINEAR THETA GRID for the Gaussian filter
+        theta_internal = np.linspace(0.0, np.pi, internal_bins)
 
+        # We derive mu solely for the solid angle calculations inside the sphere
+        mu_internal = np.cos(theta_internal)
+
+        # 1. ONE COLLECTOR TO RULE THEM ALL
+        collector = CollectionSphere(mu_bins=mu_internal, wavelength_nm=wavelength_nm, num_phi_bins=360)
+
+        # 2. Accumulate every single wavefront coherently into the exact same complex bins
         for rays, patch, name in exiting_wavefronts:
             collector.accumulate(rays, patch, patch_area)
 
-        intensity_internal = collector.finalize()
+        # 3. Finalize ONCE at the end (Computes |E_p0 + E_p1 + E_p2 + E_p3|^2)
+        total_raw_intensity = collector.finalize()
 
-        # Interpolate to the requested mu grid
-        # mu_internal goes from 1 to -1, mu (requested) may be anything
-        theta_internal = np.arccos(np.clip(mu_internal, -1.0, 1.0))
+        # 4. Diffraction Smoothing
+        # Sadeghi's paper mentions doubling the blur kernel for the secondary bow.
+        # But since we just went full gigachad and coherently merged all the complex waves into a single
+        # physical field, we can't cleanly separate the secondary bow out for custom blurring anymore.
+        # We just apply the baseline physical diffraction smoothing to the entire unified field.
+        total_intensity_internal = apply_diffraction_smoothing(
+            theta_rad=theta_internal,
+            intensity=total_raw_intensity,
+            radius_mm=radius_mm,
+            is_secondary=False
+        )
+
+        total_intensity = total_intensity_internal
+
+        integral = float(np.trapezoid(total_intensity * np.sin(theta_internal), theta_internal) * 2.0 * np.pi)
+        normalized_total = (total_intensity / (integral + 1e-12)).astype(np.float32)
+
+        # Map back to whatever 'mu' grid the user originally requested
         theta_requested = np.arccos(np.clip(mu, -1.0, 1.0))
-
-        return np.interp(theta_requested, theta_internal, intensity_internal)
+        return np.interp(theta_requested, theta_internal, normalized_total)

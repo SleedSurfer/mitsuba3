@@ -29,7 +29,7 @@ def get_asset_path(scene_name, asset_type="meshes"):
 
 
 # --- PHASE WRAPPER LOADER ---
-def get_phase_plugin(radius_mean=3.95, radius_std=0.03,num_angles=4096,num_wavelengths=64, note="default"):
+def get_phase_plugin(radius_mean=3.95, radius_std=0.03,num_angles=4096,num_wavelengths=64, note="default",force_regen=False):
     """
     Dynamically loads the wrapper.py to generate the .bin table.
     Falls back to HG if wrapper is missing.
@@ -43,7 +43,7 @@ def get_phase_plugin(radius_mean=3.95, radius_std=0.03,num_angles=4096,num_wavel
             num_angles=num_angles,
             num_wavelengths=num_wavelengths,
             note=note,
-            force_regen=False
+            force_regen=force_regen
         )
     except ImportError:
         print("[Utils] Wrapper not found or import failed. Using HG fallback.")

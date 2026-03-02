@@ -42,11 +42,11 @@ def _resolve_backend(name: str):
 
     # Geometric Optics (Large / Fast)
     if name in ("jit_traced", "drjit", "raytracer"):
-        return DrJitRaytracerBackend(grid_res=1024,particle_shape="sphere")  # Default sensible ray count
+        return DrJitRaytracerBackend(grid_res=512,particle_shape="sphere")  # Default sensible ray count
     # Hybrid (The Best of Both Worlds)
     if name in ("hybrid",):
         # Default hybrid config; usually overridden by auto logic
-        return HybridBackend(MiePythonBackend(), DrJitRaytracerBackend())
+        return HybridBackend(MiePythonBackend(), DrJitRaytracerBackend(grid_res=512))
 
     raise ValueError(f"Unknown backend '{name}'. Supported: auto, mie, jit_traced, go_airy, hybrid")
 
@@ -90,16 +90,17 @@ def create_atmospheric_phase(
         cache_dir="cache",
 
         # Tuning params for the Hybrid switch
-        x_mie_only=700.0,
-        x_go_only=1400.0,
-        hybrid_x0=800.0,
-        hybrid_x1=1400.0
+        x_mie_only=500.0,  # Pure Mie up to ~55 µm
+        hybrid_x0=500.0,  # Start blend at ~55 µm
+        hybrid_x1=850.0,  # End blend at ~95 µm
+        x_go_only=850.0  # 100% GO for anything >= 100 µm
 ):
     config = MieConfig(
         radius_mean_um=radius_mean_um,
         radius_std_um=radius_std_um,
         num_angles=num_angles,
         num_wavelengths=num_wavelengths,
+        num_samples=100, #TODO reduced from 128 for testing
         note=note,
     )
 
@@ -116,7 +117,7 @@ def create_atmospheric_phase(
             be = MiePythonBackend()
         elif x_mean >= x_go_only:
             print(f"[Wrapper] Auto-select: Large drop (x={x_mean:.1f}) -> Dr.Jit Raytracer")
-            be = DrJitRaytracerBackend()
+            be = DrJitRaytracerBackend(grid_res=512)
         else:
             print(f"[Wrapper] Auto-select: Transition zone (x={x_mean:.1f}) -> Hybrid (Mie + Raytracer)")
             # We blend Mie (Low) with Dr.Jit (High)
@@ -137,8 +138,8 @@ def create_atmospheric_phase(
         print(f"          Params: r={radius_mean_um}um, std={radius_std_um}um")
 
         try:
-            table = generate_phase_table(config, backend=be)
-            save_binary_file(file_path, table, config)
+            phase_table, mu, wavelengths = generate_phase_table(config, backend=be)
+            save_binary_file(file_path, phase_table, mu, wavelengths, config)
 
             # Generate visualizations only on success
             if generate_heatmap:

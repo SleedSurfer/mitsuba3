@@ -30,7 +30,7 @@ if __name__ == "__main__":
     scene_dict = pure_rainbow.get_scene(CONFIG)
     run_render_bench(
         scene_dict,
-        run_name="rain_test",
+        run_name="rain_test_newRT_waves_smallres",
         config=CONFIG,
     )
 

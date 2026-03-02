@@ -79,7 +79,8 @@ def plot_polar_log(phase_table, num_angles, num_wavelengths, min_wl, max_wl, out
     vis_min = np.percentile(log_all_data, 1) - 0.2
 
     # Ceiling: The actual peak of the forward scattering (The Sun)
-    vis_max = np.max(log_all_data) + 0.5
+    vis_max = np.max(log_all_data)
+
 
     print(f"  [Vis] Scaling Range: {vis_min:.2f} to {vis_max:.2f} (Sun Included)")
 

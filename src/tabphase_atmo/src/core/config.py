@@ -10,6 +10,7 @@ class MieConfig:
     # --- PHYSICS PARAMETERS ---
     radius_mean_um: float = 150.0
     radius_std_um: float = 20.0
+    material: str = "water"  # Material type: 'water' or 'ice'
 
     # --- SIMULATION RESOLUTION (The "Quality") ---
     num_angles: int = 1024

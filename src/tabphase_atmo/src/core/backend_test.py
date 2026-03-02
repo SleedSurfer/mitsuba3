@@ -27,13 +27,13 @@ def test_raytracer_explicit():
     # Large radius (1.5mm) to ensure Geometric Optics is valid.
     # Low std_dev to make the primary rainbow sharp.
     params = {
-        "radius_mean_um": 400.0,  # 1.5mm (Huge drop)
-        "radius_std_um": 20.0,  # Very uniform size
-        "num_angles": 1024,  # High res to see the spike
+        "radius_mean_um": 220.0,  # 1.5mm (Huge drop)
+        "radius_std_um": 60.0,  # Very uniform size
+        "num_angles": 360,  # High res to see the spike
         "num_wavelengths": 8,  # Keep it fast
         "backend": "jit_traced",  # <--- EXPLICIT CALL
         "force_regen": True,  # Force it to run
-        "note": "test_rt_v3"
+        "note": "help"
     }
 
     # params = {

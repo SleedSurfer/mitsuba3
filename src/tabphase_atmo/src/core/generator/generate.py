@@ -10,19 +10,10 @@ import multiprocessing
 # Use relative import for the analyzer and internal config
 from .lobe_analyzer import analyze_lut_for_mis, write_mis_metadata
 from ..config import MieConfig
+from ..materials import get_material_ior
 
 from .backends.base import ScatteringBackend
 from .backends.mie import MiePythonBackend
-
-
-def get_water_ior(wavelength_nm):  # Sellmeier
-    w_um = wavelength_nm / 1000.0
-    A = [5.666959820e-1, 1.731900098e-1, 2.026271125e-2, 1.139365864e-1]
-    B = [5.084151894e-3, 1.818488474e-2, 2.625439472e-2, 1.073842352e1]
-    n_squared = 1.0
-    for i in range(4):
-        n_squared += (A[i] * w_um**2) / (w_um**2 - B[i])
-    return complex(np.sqrt(n_squared), 0.0)
 
 
 def _compute_lognormal_params(radius_mean_um, radius_std_um):
@@ -59,14 +50,15 @@ def _process_wavelength(
 
     # --- 2. PHYSICS (Same Cost) ---
     w_clamp = max(config.min_wavelength, min(config.max_wavelength, w_nm))
-    m = get_water_ior(w_clamp)
+    m = get_material_ior(config.material, w_clamp)
     w_um = w_clamp / 1000.0
 
     intensity_cheb = np.zeros_like(mu_cheb)
 
     for j, r_um in enumerate(radii):
         x = 2 * np.pi * r_um / w_um
-        intensity_cheb += weights[j] * backend.intensity_unpolarized(m, x, mu_cheb)
+        physical_weight = weights[j] * (r_um ** 2)
+        intensity_cheb += physical_weight * backend.intensity_unpolarized(m, w_nm, r_um, mu_cheb)
 
     # --- 3. RE-GRIDDING (Linear Interpolation) ---
     # We must save to a linear grid for the Mitsuba plugin.
@@ -84,8 +76,7 @@ def _process_wavelength(
     normalized_phase = intensity_linear / (raw_integral + 1e-12)
 
     # Debug: Check if we captured the energy this time
-    if index % 10 == 0:
-        print(f"  [Gen] {w_nm:.1f}nm | Integral Capture: {raw_integral:.4f}", flush=True)
+    print(f"  [Gen] {w_nm:.1f}nm | Integral Capture: {raw_integral:.4f}", flush=True)
 
     return index, normalized_phase.astype(np.float32)
 
@@ -125,14 +116,25 @@ def generate_phase_table(config: MieConfig, backend: ScatteringBackend):
     for idx, data in results:
         phase_table[idx, :] = data
 
-    return phase_table
+    return phase_table, mu, wavelengths
 
 
 def generate_mie_table(config: MieConfig = MieConfig()):
     return generate_phase_table(config, backend=MiePythonBackend())
 
 
-def save_binary_file(filename, phase_table, config: MieConfig):
+def save_binary_file(filename, phase_table, mu_vals, wavelengths, config: MieConfig):
+    """
+    Save phase table to binary .bin file with ATMPHASE format.
+    Handles both LUT data and MIS metadata.
+
+    Args:
+        filename: Output file path
+        phase_table: Phase function data [num_wavelengths, num_angles]
+        mu_vals: Cosine of scattering angles (for MIS analysis)
+        wavelengths: Wavelength array in nm
+        config: MieConfig for metadata
+    """
     phase_interleaved = phase_table.T
     data_flat = phase_interleaved.flatten().astype(np.float32)
 
@@ -148,10 +150,6 @@ def save_binary_file(filename, phase_table, config: MieConfig):
     print(f"[GEN] Saved binary: {filename}")
 
     print(f"[GEN] Analyzing LUT for MIS metadata...")
-    theta = np.linspace(0, np.pi, config.num_angles)
-    mu_vals = np.cos(theta)
-    wavelengths = np.linspace(config.min_wavelength, config.max_wavelength, config.num_wavelengths)
-
     lobes, weights = analyze_lut_for_mis(phase_table, mu_vals, wavelengths)
 
     with open(filename, "ab") as f:

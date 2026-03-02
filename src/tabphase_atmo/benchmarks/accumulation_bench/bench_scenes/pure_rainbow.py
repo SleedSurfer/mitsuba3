@@ -1,21 +1,20 @@
 import mitsuba as mi
-from ..utils import get_asset_path, get_phase_plugin
-import mitsuba as mi
-from ..utils import get_asset_path, get_phase_plugin, generate_cloud_grid
+from ..utils import get_asset_path, generate_cloud_grid
+from src.core.wrapper import create_atmospheric_phase
 
 
 def get_scene(config):
 
-    light_mod = 1.0
+    light_mod = 4.0
 
     # --- PHASE FUNCTION ---
-
-    phase_dict = get_phase_plugin(
-        radius_mean=1800,
-        radius_std=800,
-        num_angles=8192,
-        num_wavelengths=64,
-        note="rain_test"
+    phase_dict = create_atmospheric_phase(
+        radius_mean_um=220.0,
+        radius_std_um=0.0,
+        num_angles=360,
+        num_wavelengths=8,
+        note="help",
+        force_regen=True
     )
 
     sun_direction = [0, 0, -1]
@@ -24,7 +23,7 @@ def get_scene(config):
         "type": "scene",
         "integrator": {
             "type": "volpath",
-            "max_depth": -1,
+            "max_depth": 2,
         },
         "sensor": {
             "type": "perspective",
