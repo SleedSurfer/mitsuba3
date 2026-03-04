@@ -12,34 +12,27 @@ class GridEmitter:
         """
         num_rays = grid_res * grid_res
 
-        # 1. Generate grid coordinates (0 to grid_res - 1)
         index = dr.arange(UInt32, num_rays)
         ix = index % grid_res
         iy = index // grid_res
 
-        # Map to physical space (-width/2 to width/2)
         step = width_mm / (grid_res - 1) if grid_res > 1 else 0.0
         x = Float(ix) * step - (width_mm / 2.0)
         y = Float(iy) * step - (width_mm / 2.0)
         z = dr.zeros(Float, num_rays) - 10.0  # Start 10mm back
 
-        # 2. Build the PhasorRay PyTree
-        # dr.zeros automatically allocates the arrays for the dataclass fields!
         rays = dr.zeros(PhasorRay, num_rays)
 
-        # Overwrite the necessary initial conditions
-        rays.o = Array3f(x, y, z)
-        rays.d = Array3f(0.0, 0.0, 1.0)  # All pointing strictly forward (+Z)
-        rays.Ex = Complex2f(1.0, 0.0)  # Unpolarized amplitude 1, phase 0
+        rays.origin = Array3f(x, y, z)
+        rays.direction = Array3f(0.0, 0.0, 1.0)  #+Z
+        rays.Ex = Complex2f(1.0, 0.0)
         rays.Ey = Complex2f(1.0, 0.0)
 
-        # 3. Build the Patches (Grid adjacency)
         num_patches = (grid_res - 1) * (grid_res - 1)
         p_index = dr.arange(UInt32, num_patches)
         px = p_index % (grid_res - 1)
         py = p_index // (grid_res - 1)
 
-        # Map patch 2D index to the 4 corner ray indices
         top_left = py * grid_res + px
 
         patches = dr.zeros(RayPatch, num_patches)

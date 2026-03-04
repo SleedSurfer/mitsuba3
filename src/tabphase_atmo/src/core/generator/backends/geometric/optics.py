@@ -8,13 +8,11 @@ def compute_fresnel_and_scatter(d: Array3f, n: Array3f, ior_in: float, ior_out: 
     """
     eta = Float(ior_in / ior_out)
 
-    # 1. ENFORCE NORMAL FLIP
-    # If the ray and normal point the same way, we are inside hitting out. Flip it.
+    # ENFORCE NORMAL FLIP
     cos_theta_i_raw = -dr.dot(d, n)
     n_safe = dr.select(cos_theta_i_raw < 0.0, -n, n)
     cos_theta_i = dr.abs(cos_theta_i_raw) # Now strictly positive
 
-    # 2. Trajectories
     d_reflected = d + n_safe * (Float(2.0) * cos_theta_i)
 
     k = Float(1.0) - (eta * eta) * (Float(1.0) - cos_theta_i * cos_theta_i)
@@ -23,7 +21,6 @@ def compute_fresnel_and_scatter(d: Array3f, n: Array3f, ior_in: float, ior_out: 
     sqrt_k_real = dr.sqrt(dr.maximum(k, Float(0.0)))
     d_refracted = d * eta + n_safe * (eta * cos_theta_i - sqrt_k_real)
 
-    # 3. Complex Fresnel
     cos_theta_t = Complex2f(
         dr.select(is_tir, Float(0.0), dr.sqrt(k)),
         dr.select(is_tir, dr.sqrt(-k), Float(0.0))

@@ -32,12 +32,12 @@ def test_void_propagation(grid_data):
     distance_to_move = 15.0  # mm
 
     # Move rays forward
-    rays.o += rays.d * distance_to_move
+    rays.origin += rays.direction * distance_to_move
 
     # Update optical path (index of refraction of vacuum is 1.0)
-    rays.l += distance_to_move * 1.0
+    rays.opt_path_length += distance_to_move * 1.0
 
-    assert dr.allclose(rays.l, Float(15.0)), "Optical path tracking is cooked."
+    assert dr.allclose(rays.opt_path_length, Float(15.0)), "Optical path tracking is cooked."
 
 
 def test_destructive_interference():
@@ -66,8 +66,8 @@ def test_grid_boundaries(grid_data):
     rays, _ = grid_data
 
     # We requested a 2.0 mm width. Rays should strictly span -1.0 to 1.0.
-    assert dr.allclose(dr.min(rays.o.x), -1.0, atol=1e-5), "Grid min boundary is fucked."
-    assert dr.allclose(dr.max(rays.o.x), 1.0, atol=1e-5), "Grid max boundary is fucked."
+    assert dr.allclose(dr.min(rays.origin.x), -1.0, atol=1e-5), "Grid min boundary is fucked."
+    assert dr.allclose(dr.max(rays.origin.x), 1.0, atol=1e-5), "Grid max boundary is fucked."
 
 
 def test_patch_indexing(grid_data):

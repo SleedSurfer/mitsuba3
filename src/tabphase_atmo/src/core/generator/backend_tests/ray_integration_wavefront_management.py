@@ -37,7 +37,7 @@ def test_master_bounce_loop():
 
     print("\nWavefront Manifest:")
     for rays, patches, name in wavefronts:
-        print(f"  - {name} | Rays: {len(rays.l)} | Patches: {len(patches.v0)}")
+        print(f"  - {name} | Rays: {len(rays.opt_path_length)} | Patches: {len(patches.v0)}")
 
     # Extract specific bounces
     p0_rays, _, p0_name = wavefronts[0]
@@ -47,20 +47,20 @@ def test_master_bounce_loop():
 
     # Check B: Focal Line Physics
     # (Checking if the particle contract handed out the right pi/2 phase shifts)
-    assert dr.all(p0_rays.f == 0), "p=0 (External Reflection) should have 0 focal lines."
-    assert dr.all(p1_rays.f == 0), "p=1 (Direct Transmission) should have 0 focal lines."
-    assert dr.all(p2_rays.f == 1), "p=2 (Primary Rainbow) should have 1 focal line."
-    assert dr.all(p3_rays.f == 2), "p=3 (Secondary Rainbow) should have 2 focal lines."
+    assert dr.all(p0_rays.focal_lines_crossed == 0), "p=0 (External Reflection) should have 0 focal lines."
+    assert dr.all(p1_rays.focal_lines_crossed == 0), "p=1 (Direct Transmission) should have 0 focal lines."
+    assert dr.all(p2_rays.focal_lines_crossed == 1), "p=2 (Primary Rainbow) should have 1 focal line."
+    assert dr.all(p3_rays.focal_lines_crossed == 2), "p=3 (Secondary Rainbow) should have 2 focal lines."
 
     print("[PASS] Focal line phase shifts applied perfectly across all bounces.")
 
     # Check C: Optical Path Length (l) validation
     # The optical path should strictly increase with every internal bounce
     # We grab the max optical path of the dead-center ray to verify the water traversal
-    l0 = dr.max(p0_rays.l)
-    l1 = dr.max(p1_rays.l)
-    l2 = dr.max(p2_rays.l)
-    l3 = dr.max(p3_rays.l)
+    l0 = dr.max(p0_rays.opt_path_length)
+    l1 = dr.max(p1_rays.opt_path_length)
+    l2 = dr.max(p2_rays.opt_path_length)
+    l3 = dr.max(p3_rays.opt_path_length)
 
     assert l1 > l0, "Optical path did not increase going inside the droplet!"
     assert l2 > l1, "Optical path did not increase on internal bounce 1!"
@@ -92,11 +92,11 @@ def test_phase_coherence():
     # We'll just grab the 0th field of the gathered complex results (representing the first few patches)
     def get_phasor_stats(r_idx):
         # Gather 'l' as before
-        l = dr.gather(Float, rays.l, r_idx)
+        l = dr.gather(Float, rays.opt_path_length, r_idx)
 
         # FIX: Just use the type of rays.f directly for the gather
         # then cast the result to Float for the math
-        f_gathered = dr.gather(type(rays.f), rays.f, r_idx)
+        f_gathered = dr.gather(type(rays.focal_lines_crossed), rays.focal_lines_crossed, r_idx)
         f = Float(f_gathered)
 
         # Phase = k*l - f*pi/2
@@ -128,18 +128,18 @@ def test_phase_coherence():
     valid_phase_delta = dr.select(hit_mask_p, phase_delta, 0.0)
     max_delta = dr.max(phase_delta)
     max_delta_val = dr.max(valid_phase_delta)[0]
-    delta_l = dr.abs(dr.gather(Float, rays.l, patches.v1) - dr.gather(Float, rays.l, patches.v0))
+    delta_l = dr.abs(dr.gather(Float, rays.opt_path_length, patches.v1) - dr.gather(Float, rays.opt_path_length, patches.v0))
     print(f"Distance delta between rays: {delta_l[0]} mm")
 
     print(f"Max Phase Delta between adjacent rays: {max_delta_val:.4f} rad")
 
     # Inside your test_phase_coherence
-    l_subset = dr.gather(Float, rays.l, dr.arange(dr.uint32_array_t(Float), 10))
+    l_subset = dr.gather(Float, rays.opt_path_length, dr.arange(dr.uint32_array_t(Float), 10))
     print(f"Sample Path Lengths: {l_subset}")
 
     # Also check the total range
-    l_min = dr.min(rays.l)[0]
-    l_max = dr.max(rays.l)[0]
+    l_min = dr.min(rays.opt_path_length)[0]
+    l_max = dr.max(rays.opt_path_length)[0]
     print(f"Path Range: {l_min:.6f} to {l_max:.6f} mm")
     # If this is way above pi (3.14), we have an aliasing problem.
     # In a 50x50 grid on a droplet, it should be quite small.

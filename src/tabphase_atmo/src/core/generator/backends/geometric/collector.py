@@ -10,8 +10,6 @@ from .models.ray_patch import RayPatch
 class CollectionSphere:
     """
     Collects exiting wavefront patches into a 2D grid (theta, phi).
-    Uses the paper's exact amplitude density scaling sqrt(a_i / s_i)
-    to account for wavefront divergence and caustics.
     """
 
     def __init__(self, mu_bins: np.ndarray, num_phi_bins: int, wavelength_nm: float):
@@ -53,12 +51,12 @@ class CollectionSphere:
 
     def _gather_ray_data_full(self, rays: PhasorRay, indices: UInt32):
         d = Array3f(
-            dr.gather(Float, rays.d.x, indices),
-            dr.gather(Float, rays.d.y, indices),
-            dr.gather(Float, rays.d.z, indices)
+            dr.gather(Float, rays.direction.x, indices),
+            dr.gather(Float, rays.direction.y, indices),
+            dr.gather(Float, rays.direction.z, indices)
         )
-        l = dr.gather(Float, rays.l, indices)
-        f = Float(dr.gather(type(rays.f), rays.f, indices))
+        l = dr.gather(Float, rays.opt_path_length, indices)
+        f = Float(dr.gather(type(rays.focal_lines_crossed), rays.focal_lines_crossed, indices))
 
         ex = Complex2f(
             dr.gather(Float, rays.Ex.real, indices),
@@ -78,11 +76,9 @@ class CollectionSphere:
         return ex * rotation, ey * rotation
 
     def _dir_to_continuous_coords(self, d: Array3f) -> Tuple[Float, Float]:
-        # 1. Continuous Theta (Polar) - Strictly Linear!
         theta = dr.acos(dr.clip(d.z, Float(-1.0), Float(1.0)))
         theta_coord = (theta / Float(np.pi)) * Float(self.num_mu_bins - 1)
 
-        # 2. Continuous Phi (Azimuthal)
         phi = dr.atan2(d.y, d.x)
         normalized_phi = (phi + Float(np.pi)) / Float(2.0 * np.pi)
         phi_coord = normalized_phi * Float(self.num_phi_bins)
@@ -101,6 +97,10 @@ class CollectionSphere:
 
         return phi_idx * self.num_mu_bins + mu_idx
 
+    def _scatter_cplx(self,arr_r, arr_i, val_r, val_i, w, idx, mask):
+        dr.scatter_add(arr_r, val_r * w, idx, mask)
+        dr.scatter_add(arr_i, val_i * w, idx, mask)
+
     def accumulate(self, rays: PhasorRay, patches: RayPatch, patch_area: float):
         if self._bins_ex_real is None:
             self.reset()
@@ -114,29 +114,16 @@ class CollectionSphere:
 
         d_avg = dr.normalize(d0 + d1 + d2 + d3)
 
-        # 1. Caustic Tracking (We still need the cross product for the sign flip!)
-        diag1 = d3 - d0
-        diag2 = d2 - d1
-        cross_area = dr.cross(diag1, diag2)
-        signed_area = dr.dot(cross_area, d_avg)
+        px0, py0 = self._apply_phasor_rotation(ex0, ey0, l0, f0)
+        px1, py1 = self._apply_phasor_rotation(ex1, ey1, l1, f1)
+        px2, py2 = self._apply_phasor_rotation(ex2, ey2, l2, f2)
+        px3, py3 = self._apply_phasor_rotation(ex3, ey3, l3, f3)
 
-        # If the wavefront folded, add a focal crossing (Gouy phase shift)
-        caustic_penalty = dr.select(signed_area < 0.0, Float(1.0), Float(0.0))
-
-        # 2. Phase Rotations
-        px0, py0 = self._apply_phasor_rotation(ex0, ey0, l0, f0 + caustic_penalty)
-        px1, py1 = self._apply_phasor_rotation(ex1, ey1, l1, f1 + caustic_penalty)
-        px2, py2 = self._apply_phasor_rotation(ex2, ey2, l2, f2 + caustic_penalty)
-        px3, py3 = self._apply_phasor_rotation(ex3, ey3, l3, f3 + caustic_penalty)
-
-        # 3. THE FIX: Pure Area Weighting (No s_i division!)
-        # We just weight the complex amplitude by the physical emitted area
         patch_weight = dr.sqrt(Float(patch_area * 0.25))
 
         ex_avg = (px0 + px1 + px2 + px3) * patch_weight
         ey_avg = (py0 + py1 + py2 + py3) * patch_weight
 
-        # 4. Bilinear Splatting Coordinates
         phi_c, theta_c = self._dir_to_continuous_coords(d_avg)
         phi_0 = dr.floor(phi_c)
         theta_0 = dr.floor(theta_c)
@@ -161,27 +148,20 @@ class CollectionSphere:
 
         valid = dr.isfinite(d_avg.z)
 
-        # 5. Splat the complex amplitudes bilinearly
-        def scatter_cplx(arr_r, arr_i, val_r, val_i, w, idx, mask):
-            dr.scatter_add(arr_r, val_r * w, idx, mask)
-            dr.scatter_add(arr_i, val_i * w, idx, mask)
+        self._scatter_cplx(self._bins_ex_real, self._bins_ex_imag, ex_avg.real, ex_avg.imag, w00, idx_00, valid)
+        self._scatter_cplx(self._bins_ex_real, self._bins_ex_imag, ex_avg.real, ex_avg.imag, w10, idx_10, valid)
+        self._scatter_cplx(self._bins_ex_real, self._bins_ex_imag, ex_avg.real, ex_avg.imag, w01, idx_01, valid)
+        self._scatter_cplx(self._bins_ex_real, self._bins_ex_imag, ex_avg.real, ex_avg.imag, w11, idx_11, valid)
 
-        scatter_cplx(self._bins_ex_real, self._bins_ex_imag, ex_avg.real, ex_avg.imag, w00, idx_00, valid)
-        scatter_cplx(self._bins_ex_real, self._bins_ex_imag, ex_avg.real, ex_avg.imag, w10, idx_10, valid)
-        scatter_cplx(self._bins_ex_real, self._bins_ex_imag, ex_avg.real, ex_avg.imag, w01, idx_01, valid)
-        scatter_cplx(self._bins_ex_real, self._bins_ex_imag, ex_avg.real, ex_avg.imag, w11, idx_11, valid)
-
-        # Do the same for Ey
-        scatter_cplx(self._bins_ey_real, self._bins_ey_imag, ey_avg.real, ey_avg.imag, w00, idx_00, valid)
-        scatter_cplx(self._bins_ey_real, self._bins_ey_imag, ey_avg.real, ey_avg.imag, w10, idx_10, valid)
-        scatter_cplx(self._bins_ey_real, self._bins_ey_imag, ey_avg.real, ey_avg.imag, w01, idx_01, valid)
-        scatter_cplx(self._bins_ey_real, self._bins_ey_imag, ey_avg.real, ey_avg.imag, w11, idx_11, valid)
+        self._scatter_cplx(self._bins_ey_real, self._bins_ey_imag, ey_avg.real, ey_avg.imag, w00, idx_00, valid)
+        self._scatter_cplx(self._bins_ey_real, self._bins_ey_imag, ey_avg.real, ey_avg.imag, w10, idx_10, valid)
+        self._scatter_cplx(self._bins_ey_real, self._bins_ey_imag, ey_avg.real, ey_avg.imag, w01, idx_01, valid)
+        self._scatter_cplx(self._bins_ey_real, self._bins_ey_imag, ey_avg.real, ey_avg.imag, w11, idx_11, valid)
 
     def finalize(self) -> np.ndarray:
         omega_1d = np.tile(self._solid_angles_1d, self.num_phi_bins)
         omega_dr = Float(omega_1d)
 
-        # THE FIX: Square first, THEN divide by solid angle
         intensity = (self._bins_ex_real ** 2 + self._bins_ex_imag ** 2 +
                      self._bins_ey_real ** 2 + self._bins_ey_imag ** 2) / omega_dr
 

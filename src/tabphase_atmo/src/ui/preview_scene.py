@@ -66,7 +66,7 @@ def create_preview_scene(
         'sun': {
             'type': 'directional',
             'direction': sun_direction,
-            'irradiance': {'type': 'rgb', 'value': 50.0 * 4},
+            'irradiance': {'type': 'rgb', 'value': 50.0/4},
         },
         # Cloud slab
         'cloud_slab': {

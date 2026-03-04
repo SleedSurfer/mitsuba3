@@ -21,14 +21,14 @@ def test_sphere_intersection():
     # Ray 0: Dead center
     # Ray 1: Edge Collision
     # Ray 2: Whiffed (x=2.0)
-    rays.o = Array3f(
+    rays.origin = Array3f(
         [0.0, 1.0, 2.0],
         [0.0, 0.0, 0.0],
         [-10.0, -10.0, -10.0]
     )
 
     # headings
-    rays.d = Array3f(
+    rays.direction = Array3f(
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
         [1.0, 1.0, 1.0]
@@ -55,8 +55,8 @@ def test_sphere_scattering():
     rays = dr.zeros(PhasorRay, 3)
 
     # 0: Dead center, 1: Edge graze, 2: Miss
-    rays.o = Array3f([0.0, 1.0, 2.0], [0.0, 0.0, 0.0], [-10.0, -10.0, -10.0])
-    rays.d = Array3f([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    rays.origin = Array3f([0.0, 1.0, 2.0], [0.0, 0.0, 0.0], [-10.0, -10.0, -10.0])
+    rays.direction = Array3f([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
 
     hit_mask, t = droplet.intersect(rays)
 

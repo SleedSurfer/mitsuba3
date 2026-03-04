@@ -1,21 +1,14 @@
 import mitsuba as mi
+from core.config import MieConfig
 from ..utils import get_asset_path, generate_cloud_grid
 from src.core.wrapper import create_atmospheric_phase
 
 
-def get_scene(config):
+def get_scene(config,phase):
 
-    light_mod = 4.0
-
+    light_mod = 0.5
     # --- PHASE FUNCTION ---
-    phase_dict = create_atmospheric_phase(
-        radius_mean_um=220.0,
-        radius_std_um=0.0,
-        num_angles=360,
-        num_wavelengths=8,
-        note="help",
-        force_regen=True
-    )
+    phase_dict = create_atmospheric_phase(phase)
 
     sun_direction = [0, 0, -1]
 
@@ -27,7 +20,7 @@ def get_scene(config):
         },
         "sensor": {
             "type": "perspective",
-            "fov": 110.0,  # Wide FOV to catch the 42° rainbow radius
+            "fov": 110.0,
             "to_world": mi.ScalarTransform4f.look_at(
                 origin=(0, 0, 3),
                 target=(0, 0, 0),
@@ -42,20 +35,20 @@ def get_scene(config):
                 "rfilter": {"type": "box"}
             }
         },
-        # Directional light (The Sun)
+
         "sun": {
             "type": "directional",
             "direction": sun_direction,
             "irradiance": {"type": "rgb", "value": 50.0*light_mod},
         },
-        # The Cloud Slab
+
         "cloud_slab": {
             "type": "cube",
             "to_world": mi.ScalarTransform4f.scale([15.0, 15.0, 0.5]),
             "bsdf": {"type": "null"},
             "interior": {
                 "type": "homogeneous",
-                "sigma_t": 0.1,
+                "sigma_t": 0.03,
                 "albedo": 0.98,
                 "phase": phase_dict,
             },

@@ -26,21 +26,15 @@ class DrJitRaytracerBackend(ScatteringBackend):
 
         h = ((12.0 * sin_alpha_i) / (x ** 2 * cos_alpha_i ** 3)) ** (1 / 3.0)
 
-        # THE FIX 1: Correct the direction of the supernumeraries
-        # Primary (p=2) oscillates > theta_d. Secondary (p=3) oscillates < theta_d.
         sign = -1.0 if p == 2 else 1.0
         z = sign * (theta_grid - theta_d) / h
 
         Ai, _, _, _ = airy(z)
         intensity_airy = (Ai ** 2)
 
-        # THE FIX 2: Clamp the unphysical asymptotic tail
-        # 0.35 rad (~20 degrees) gives enough room for the supernumeraries
-        # but brutally kills the tail before it reaches the poles.
         window = np.exp(-0.5 * ((theta_grid - theta_d) / 0.35) ** 2)
         intensity_airy *= window
 
-        # Integrate and normalize
         solid_angle_weight = 2.0 * np.pi * np.sin(theta_grid)
         integral = np.trapezoid(intensity_airy * solid_angle_weight, theta_grid)
 
@@ -105,10 +99,8 @@ class DrJitRaytracerBackend(ScatteringBackend):
         theta_p = np.minimum(np.pi, theta_internal + dtheta / 2.0)
         solid_angles = 2.0 * np.pi * (np.cos(theta_m) - np.cos(theta_p))
 
-        # Base geometric (p=0, 1, 4, 5, 6)
         intensity_base = (histogram.numpy() / self.num_rays) / np.maximum(solid_angles, 1e-12)
 
-        # Forward Diffraction
         diffraction = np.zeros_like(theta_internal)
         sin_theta = np.sin(theta_internal)
         mask = theta_internal < 1e-7
@@ -117,16 +109,12 @@ class DrJitRaytracerBackend(ScatteringBackend):
         obliquity = ((1.0 + np.cos(theta_internal[~mask])) / 2.0) ** 2
         diffraction[~mask] = ((x * j1(u_val) / sin_theta[~mask]) ** 2) * obliquity
 
-        # Re-inject rainbows as Airy Lobes
-        # We divide by solid angles because apply_airy_lobe returns an angular distribution,
-        # but our final total needs to be an intensity (per steradian).
         p2_total = energy_p2.numpy()[0] / self.num_rays
         p3_total = energy_p3.numpy()[0] / self.num_rays
 
         intensity_p2 = self.apply_airy_lobe(theta_internal, p2_total, m, x, p=2)
         intensity_p3 = self.apply_airy_lobe(theta_internal, p3_total, m, x, p=3)
 
-        # --- 4. COMBINE AND NORMALIZE ---
         total_intensity = intensity_base + diffraction + intensity_p2 + intensity_p3
         total_int = np.sum(total_intensity * solid_angles)
         normalized = total_intensity / (total_int + 1e-12)

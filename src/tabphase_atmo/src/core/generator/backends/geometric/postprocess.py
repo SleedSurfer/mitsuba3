@@ -8,45 +8,63 @@ _RADIUS_MM = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
 _SIGMA_DEG = np.array([0.70, 0.45, 0.30, 0.25, 0.22, 0.20, 0.18, 0.17, 0.16, 0.15])
 
 
+import numpy as np
+from scipy.ndimage import gaussian_filter1d
+
+import numpy as np
+from scipy.ndimage import gaussian_filter1d
+
+
 def apply_diffraction_smoothing(
         theta_rad: np.ndarray,
         intensity: np.ndarray,
-        radius_mm: float,
-        is_secondary: bool = False
+        radius_mm: float
 ) -> np.ndarray:
     """
-    Applies a physically-based Gaussian blur to approximate wave diffraction,
-    softening the infinite peaks predicted by pure geometric optics.
+    Applies localized Gaussian blurs to the primary and secondary rainbow caustics,
+    leaving forward scattering and supernumerary fringes pristine.
     """
-    # 1. Interpolate the required sigma from the paper's empirical table
-    # We clip the radius to stay within the bounds of the provided data
     radius_clamped = np.clip(radius_mm, _RADIUS_MM[0], _RADIUS_MM[-1])
-    sigma_deg = np.interp(radius_clamped, _RADIUS_MM, _SIGMA_DEG)
 
-    # The paper doubles the blur radius for the secondary rainbow (p=3)
-    # to account for the extra internal reflection scattering.
-    if is_secondary:
-        sigma_deg *= 2.0
+    # Primary sigma
+    base_sigma_deg = np.interp(radius_clamped, _RADIUS_MM, _SIGMA_DEG)
+    sigma_rad_pri = np.radians(base_sigma_deg)
 
-    sigma_rad = np.radians(sigma_deg)
+    # Secondary sigma (Sadeghi doubles it)
+    sigma_rad_sec = np.radians(base_sigma_deg * 2.0)
 
-    # 2. Convert the spatial standard deviation (radians) into array bins
-    # We need to know how many radians each bin in our array represents
     num_bins = len(theta_rad)
     if num_bins < 2:
-        return intensity  # Cannot filter a point
+        return intensity
 
-    # Assuming theta_rad is uniformly spaced (which it is from our linspace)
     dtheta = abs(theta_rad[1] - theta_rad[0])
+    sigma_bins_pri = sigma_rad_pri / dtheta
+    sigma_bins_sec = sigma_rad_sec / dtheta
 
-    # Calculate sigma in terms of array indices
-    sigma_bins = sigma_rad / dtheta
+    # 1. Generate the fully blurred signals for both primary and secondary
+    smoothed_pri = gaussian_filter1d(intensity, sigma=sigma_bins_pri, mode='nearest')
+    smoothed_sec = gaussian_filter1d(intensity, sigma=sigma_bins_sec, mode='nearest')
 
-    # 3. Apply the 1D Gaussian convolution
-    # mode='nearest' prevents the edges of the polar plot from dropping to zero
-    smoothed_intensity = gaussian_filter1d(intensity, sigma=sigma_bins, mode='nearest')
+    # 2. Box in the search area to stop np.argmax from finding the 0° sun nuke.
+    # Primary rainbow is typically around 137° - 142°
+    mask_pri = (theta_rad >= np.radians(135.0)) & (theta_rad <= np.radians(145.0))
+    # Secondary rainbow is typically around 125° - 130°
+    mask_sec = (theta_rad >= np.radians(120.0)) & (theta_rad <= np.radians(132.0))
 
-    return smoothed_intensity
+    # Find the exact geometric cliffs within those bounds
+    peak_idx_pri = np.argmax(np.where(mask_pri, intensity, 0.0))
+    peak_idx_sec = np.argmax(np.where(mask_sec, intensity, 0.0))
+
+    # 3. Build soft Gaussian windows centered exactly on the singularities.
+    window_pri = np.exp(-0.5 * ((np.arange(num_bins) - peak_idx_pri) / (sigma_bins_pri * 3.0)) ** 2)
+    window_sec = np.exp(-0.5 * ((np.arange(num_bins) - peak_idx_sec) / (sigma_bins_sec * 3.0)) ** 2)
+
+    # 4. Composite: blend the primary blur, the secondary blur, and keep the rest raw.
+    final_intensity = (intensity * (1.0 - window_pri - window_sec)) + \
+                      (smoothed_pri * window_pri) + \
+                      (smoothed_sec * window_sec)
+
+    return np.maximum(final_intensity, 0.0)
 
 
 def compute_fraunhofer_diffraction(theta_rad: np.ndarray, x: float) -> np.ndarray:
