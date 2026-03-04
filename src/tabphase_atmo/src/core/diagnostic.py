@@ -18,7 +18,7 @@ from pathlib import Path
 # CONFIG — edit these
 # ─────────────────────────────────────────────────────────────────────────────
 
-LUT_PATH = "/home/speedlord/mitsuba3/src/tabphase_atmo/src/cache/hybrid/1000um_sphere_20pctVar_8b_brute_auto.bin"
+LUT_PATH = "/home/speedlord/mitsuba3/src/tabphase_atmo/src/cache/hybrid/400um_sphere_0pctVar_8b_brute_auto.bin"
 
 # Which rows to overlay on signal/fft/zoom plots
 # -1 = auto (picks short/mid/long wavelength rows evenly)

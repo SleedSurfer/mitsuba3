@@ -10,7 +10,7 @@ from accumulation_bench.bench_scenes_win import pure_rainbow as rainbow
 from src.core.config import MieConfig
 # --- CONFIG ---
 CONFIG = {
-    'target_spp': 5120,
+    'target_spp': 8192,
     'batch_size': 256,
     'res_w': 1024,
     'res_h': 1024,
@@ -28,12 +28,12 @@ if __name__ == "__main__":
     #     config=CONFIG
     # )
 
-    cfg = MieConfig(radius_mean_um=600.0, variance=0.0, num_angles=8192, num_wavelengths=1,
+    cfg = MieConfig(radius_mean_um=300.0, variance=0.0, num_angles=8192, num_wavelengths=32,
                     brute_force_integration=True)
     scene_dict = pure_rainbow.get_scene(CONFIG,cfg)
     run_render_bench(
         scene_dict,
-        run_name="600_poly_00red",
+        run_name="300_poly_00_32wl",
         config=CONFIG,
     )
 

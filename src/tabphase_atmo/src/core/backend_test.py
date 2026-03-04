@@ -25,7 +25,7 @@ def test_raytracer_explicit():
         print(f"❌ [Dr.Jit] No JIT backend found! This will be slow/broken.")
 
 
-    params = MieConfig(radius_mean_um=1000.0, variance=0.4, num_angles=8192,num_wavelengths=1, brute_force_integration=True)
+    params = MieConfig(radius_mean_um=400.0, variance=0.0, num_angles=8192,num_wavelengths=8, brute_force_integration=True)
 
     # params = {
     #         "radius_mean_um": 50.0,  # 1.5mm (Huge drop)

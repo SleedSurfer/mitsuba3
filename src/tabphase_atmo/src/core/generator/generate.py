@@ -111,7 +111,7 @@ def generate_phase_table(config: MieConfig, backend: ScatteringBackend):
     # --- ROUTER ---
     if config.brute_force_integration:
         # 32 nodes with Gauss-Hermite is usually equivalent to like 1000 linear samples
-        num_nodes = max(config.num_samples, 32)
+        num_nodes = max(config.num_samples, 32) if config.num_samples > 1 else 1
         print(f"[Gen]   Mode: SMART BRUTE FORCE ({num_nodes} Quadrature Nodes)")
 
         mu_log, sigma_log = _compute_lognormal_params(config.radius_mean_um, config.variance)

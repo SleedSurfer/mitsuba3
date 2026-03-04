@@ -1,11 +1,10 @@
 import os
 import numpy as np
 
-# Use package-relative imports
 from .generator.backends import (
     MiePythonBackend,
     MieReferenceBackend,
-    DrJitRaytracerBackend,  # <--- NEW HOTNESS
+    DrJitRaytracerBackend,
     HybridBackend,
 )
 from .generator.generate import generate_phase_table, save_binary_file
