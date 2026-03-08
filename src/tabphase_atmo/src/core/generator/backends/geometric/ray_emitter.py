@@ -19,7 +19,7 @@ class GridEmitter:
         step = width_mm / (grid_res - 1) if grid_res > 1 else 0.0
         x = Float(ix) * step - (width_mm / 2.0)
         y = Float(iy) * step - (width_mm / 2.0)
-        z = dr.zeros(Float, num_rays) - 10.0  # Start 10mm back
+        z = dr.zeros(Float, num_rays) - (width_mm / 2.0)
 
         rays = dr.zeros(PhasorRay, num_rays)
 
@@ -27,6 +27,9 @@ class GridEmitter:
         rays.direction = Array3f(0.0, 0.0, 1.0)  #+Z
         rays.Ex = Complex2f(1.0, 0.0)
         rays.Ey = Complex2f(1.0, 0.0)
+        rays.opt_path_length = Float(0.0)
+        rays.basis_x = Array3f(1.0, 0.0, 0.0)
+        rays.basis_y = Array3f(0.0, 1.0, 0.0)
 
         num_patches = (grid_res - 1) * (grid_res - 1)
         p_index = dr.arange(UInt32, num_patches)

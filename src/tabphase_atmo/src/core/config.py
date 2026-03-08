@@ -2,15 +2,25 @@ import numpy as np
 from dataclasses import dataclass
 from enum import Enum, auto
 
+
 class ParticleShape(Enum):
     SPHERE = auto()
     BEARD_CHUANG = auto()
+
+
+class BackendType(Enum):
+    AUTO = auto()
+    MIEPYTHON = auto()
+    REFERENCE = auto()
+    DRJIT = auto()
+    HYBRID = auto()
+
 
 @dataclass
 class MieConfig:
     # --- PHYSICS PARAMETERS ---
     radius_mean_um: float = 700.0
-    variance: float = 0.2  # e.g., 0.2 means a standard deviation of 20% of the mean
+    variance: float = 0.2
     material: str = "water"
     shape: ParticleShape = ParticleShape.SPHERE
 
@@ -21,9 +31,10 @@ class MieConfig:
     max_wavelength: float = 830.0
 
     # --- ARCHITECTURE FLAGS ---
-    brute_force_integration: bool = False # Set to True to actually simulate N particles
+    backend: BackendType = BackendType.AUTO  # <--- Moved here
+    brute_force_integration: bool = False
     num_samples: int = 0
-    note: str = "auto"
+    note: str = ""  # No longer needed for backend hacks
 
     def __post_init__(self):
         # Autogen wavelengths
@@ -32,12 +43,11 @@ class MieConfig:
             base_samples = 300.0 * radius_mm
             self.num_wavelengths = int(np.clip(base_samples, 32, 512))
 
-        # Autogen sample count (only matters if they are masochistic enough to brute force)
+        # Autogen sample count
         if self.num_samples <= 0:
             if self.variance <= 0.0 or not self.brute_force_integration:
-                self.num_samples = 1 # Force 1 sample for the fast-path
+                self.num_samples = 1
             else:
-                # Dynamic scaling: higher variance = more samples needed to not alias the integral
                 self.num_samples = int(np.clip(300.0 * self.variance, 16, 256))
 
     @property
@@ -45,4 +55,7 @@ class MieConfig:
         shape_str = self.shape.name.lower()
         var_pct = int(self.variance * 100)
         mode = "brute" if self.brute_force_integration else "fast"
-        return f"{int(self.radius_mean_um)}um_{shape_str}_{var_pct}pctVar_{self.num_wavelengths}b_{mode}_{self.note}"
+        be_str = self.backend.name.lower()
+
+        base = f"{int(self.radius_mean_um)}um_{shape_str}_{var_pct}pctVar_{self.num_wavelengths}ang_{self.num_angles}b_{mode}_{be_str}"
+        return f"{base}_{self.note}" if self.note else base

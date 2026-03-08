@@ -21,51 +21,48 @@ def apply_diffraction_smoothing(
         radius_mm: float
 ) -> np.ndarray:
     """
-    Applies localized Gaussian blurs to the primary and secondary rainbow caustics,
-    leaving forward scattering and supernumerary fringes pristine.
+    Applies localized Gaussian blurs EXCLUSIVELY to the caustic singularities,
+    leaving the delicate supernumerary fringes pristine.
     """
     radius_clamped = np.clip(radius_mm, _RADIUS_MM[0], _RADIUS_MM[-1])
 
-    # Primary sigma
+    # Keep the tight primary sigma for BOTH to avoid low-pass filtering the secondary waves
     base_sigma_deg = np.interp(radius_clamped, _RADIUS_MM, _SIGMA_DEG)
-    sigma_rad_pri = np.radians(base_sigma_deg)
-
-    # Secondary sigma (Sadeghi doubles it)
-    sigma_rad_sec = np.radians(base_sigma_deg * 2.0)
+    sigma_rad = np.radians(base_sigma_deg)
 
     num_bins = len(theta_rad)
     if num_bins < 2:
         return intensity
 
     dtheta = abs(theta_rad[1] - theta_rad[0])
-    sigma_bins_pri = sigma_rad_pri / dtheta
-    sigma_bins_sec = sigma_rad_sec / dtheta
+    sigma_bins = sigma_rad / dtheta
 
-    # 1. Generate the fully blurred signals for both primary and secondary
+    sigma_bins_pri = sigma_rad / dtheta
+    sigma_bins_sec = (sigma_rad * 2.0) / dtheta
+
+    # 1. Generate the smoothed signals
     smoothed_pri = gaussian_filter1d(intensity, sigma=sigma_bins_pri, mode='nearest')
     smoothed_sec = gaussian_filter1d(intensity, sigma=sigma_bins_sec, mode='nearest')
 
-    # 2. Box in the search area to stop np.argmax from finding the 0° sun nuke.
-    # Primary rainbow is typically around 137° - 142°
+    # 2. Box in the search areas
     mask_pri = (theta_rad >= np.radians(135.0)) & (theta_rad <= np.radians(145.0))
-    # Secondary rainbow is typically around 125° - 130°
     mask_sec = (theta_rad >= np.radians(120.0)) & (theta_rad <= np.radians(132.0))
 
-    # Find the exact geometric cliffs within those bounds
     peak_idx_pri = np.argmax(np.where(mask_pri, intensity, 0.0))
     peak_idx_sec = np.argmax(np.where(mask_sec, intensity, 0.0))
 
-    # 3. Build soft Gaussian windows centered exactly on the singularities.
-    window_pri = np.exp(-0.5 * ((np.arange(num_bins) - peak_idx_pri) / (sigma_bins_pri * 3.0)) ** 2)
-    window_sec = np.exp(-0.5 * ((np.arange(num_bins) - peak_idx_sec) / (sigma_bins_sec * 3.0)) ** 2)
+    # 3. Tight crossfade windows linked to their respective sigmas
+    window_pri = np.exp(-0.5 * ((np.arange(num_bins) - peak_idx_pri) / (sigma_bins_pri * 1.5)) ** 2)
+    window_sec = np.exp(-0.5 * ((np.arange(num_bins) - peak_idx_sec) / (sigma_bins_sec * 1.5)) ** 2)
 
-    # 4. Composite: blend the primary blur, the secondary blur, and keep the rest raw.
-    final_intensity = (intensity * (1.0 - window_pri - window_sec)) + \
+    combined_window = np.clip(window_pri + window_sec, 0.0, 1.0)
+
+    # 4. Composite
+    final_intensity = (intensity * (1.0 - combined_window)) + \
                       (smoothed_pri * window_pri) + \
                       (smoothed_sec * window_sec)
 
     return np.maximum(final_intensity, 0.0)
-
 
 def compute_fraunhofer_diffraction(theta_rad: np.ndarray, x: float) -> np.ndarray:
     """

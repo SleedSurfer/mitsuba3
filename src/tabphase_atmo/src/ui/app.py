@@ -76,8 +76,8 @@ class AtmosphericPhaseApp:
             if not dummy_path.exists():
                 print(f"  Creating dummy HG phase LUT at {dummy_path}...")
                 hg_config = HGConfig(
-                    num_angles=360,        # Match MegaLUT
-                    num_wavelengths=8,     # Match MegaLUT
+                    num_angles=1024,        # Match MegaLUT
+                    num_wavelengths=10,     # Match MegaLUT
                     min_wavelength=360.0,
                     max_wavelength=830.0,
                     g=0.8                  # Forward scattering

@@ -34,7 +34,7 @@ class SphericalParticle(Particle):
         return valid_hit_mask, t
 
     def scatter(self, rays: PhasorRay, hit_mask: Bool, t: Float, ior_water: float = 1.333) -> Tuple[
-        Array3f, Array3f, Complex2f, Complex2f, Complex2f, Complex2f, Array3f]:
+        Array3f, Array3f, Complex2f, Complex2f, Complex2f, Complex2f, Array3f, Bool]:
         # 1. Exact 3D point of impact
         p = rays.origin + rays.direction * t
 
@@ -45,4 +45,4 @@ class SphericalParticle(Particle):
         out = compute_fresnel_and_scatter(rays.direction, n, 1.0, ior_water)
         d_reflected, d_refracted, r_perp, r_para, t_perp, t_para, is_tir = out
 
-        return d_reflected, d_refracted, r_perp, r_para, t_perp, t_para, n
+        return d_reflected, d_refracted, r_perp, r_para, t_perp, t_para, n, is_tir

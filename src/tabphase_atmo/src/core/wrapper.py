@@ -10,14 +10,12 @@ from .generator.backends import (
 from .generator.generate import generate_phase_table, save_binary_file
 from .generator.visualize import visualize_binary_file, visualize_polar_plot
 
-from .config import MieConfig
+from .config import MieConfig,BackendType
+
+import os
+
 
 DRJIT_GRID_SIZE = 3000
-
-
-def _size_parameter(radius_um: float, wavelength_nm: float) -> float:
-    wavelength_um = wavelength_nm / 1000.0
-    return float(2.0 * np.pi * radius_um / max(wavelength_um, 1e-9))
 
 
 def _ensure_dir(path: str) -> None:
@@ -25,40 +23,43 @@ def _ensure_dir(path: str) -> None:
         os.makedirs(path, exist_ok=True)
 
 
-def _resolve_backend(name: str):
+def _resolve_backend(backend_enum: BackendType):
     """
-    Resolves a string name to a specific backend instance.
-    'Auto' returns None to signal dynamic selection later.
+    Resolves the BackendType enum directly to an initialized backend instance.
     """
-    name = (name or "auto").lower().strip()
+    if backend_enum == BackendType.AUTO:
+        return None  # Let the wrapper decide the default fallback
 
-    if name in ("auto",):
-        return None
-
-    if name in ("mie", "miepython"):
+    if backend_enum == BackendType.MIEPYTHON:
         return MiePythonBackend()
-    if name in ("mie_ref", "reference"):
+
+    if backend_enum == BackendType.REFERENCE:
         return MieReferenceBackend()
 
-    if name in ("jit_traced", "drjit", "raytracer"):
-        return DrJitRaytracerBackend(grid_res=DRJIT_GRID_SIZE,particle_shape="sphere")  # Default sensible ray count
-    if name in ("hybrid",):
-        return HybridBackend(MiePythonBackend(), DrJitRaytracerBackend(grid_res=DRJIT_GRID_SIZE,particle_shape="sphere"))
+    if backend_enum == BackendType.DRJIT:
+        return DrJitRaytracerBackend(grid_res=DRJIT_GRID_SIZE, particle_shape="sphere")
 
-    raise ValueError(f"Unknown backend '{name}'. Supported: auto, mie, jit_traced, go_airy, hybrid")
+    if backend_enum == BackendType.HYBRID:
+        return HybridBackend(
+            MiePythonBackend(),
+            DrJitRaytracerBackend(grid_res=DRJIT_GRID_SIZE, particle_shape="sphere")
+        )
+
+    raise ValueError(f"Unknown backend enum '{backend_enum}'.")
 
 
-def _get_backend_cache_root(backend_name: str, cache_dir: str = "cache") -> str:
-    root = os.path.join(cache_dir, backend_name)
+def _get_backend_cache_root(backend_enum: BackendType, cache_dir: str = "cache") -> str:
+    # Folders are now strictly named after the enum
+    root = os.path.join(cache_dir, backend_enum.name.lower())
     _ensure_dir(root)
     return root
 
 
-def _get_paths(config: MieConfig, backend_name: str, cache_dir: str = "cache"):
+def _get_paths(config: MieConfig, cache_dir: str = "cache"):
     """
-    Centralized path generation to stop repeating os.path.join
+    Path generation is now totally driven by the config state. No loose arguments.
     """
-    root = _get_backend_cache_root(backend_name, cache_dir=cache_dir)
+    root = _get_backend_cache_root(config.backend, cache_dir=cache_dir)
 
     bin_path = os.path.join(root, f"{config.output_filename}.bin")
 
@@ -78,7 +79,6 @@ def create_atmospheric_phase(
         force_regen=False,
         generate_heatmap=True,
         generate_polar=True,
-        backend="auto",
         cache_dir="cache",
         # Tuning params for the Hybrid switch
         x_mie_only=500.0,
@@ -86,23 +86,25 @@ def create_atmospheric_phase(
         hybrid_x1=850.0,
         x_go_only=850.0
 ):
-    be = _resolve_backend(backend)
-
-    if be is None:  # "Auto" mode
-        print(f"[Wrapper] Auto-select enabled. Using Hybrid (Mie + Raytracer) for safety.")
+    # The config is the captain now.
+    be = _resolve_backend(config.backend)
+    print(f"[Wrapper] Selected backend: {config.backend.name} -> {be.name if be else 'Auto (Hybrid Fallback)'}")
+    if be is None:  # Auto mode fallback
+        print(f"[Wrapper] Auto-select enabled. Defaulting to Hybrid (Mie + Raytracer) to stay safe.")
         be = HybridBackend(
             MiePythonBackend(),
             DrJitRaytracerBackend(grid_res=DRJIT_GRID_SIZE),
-            x0=800.0,  # Transition point
-            x1=1400.0  # Full Raytracer here
+            x0=800.0,
+            x1=1400.0
         )
 
-    file_path, heatmap_path, polar_path = _get_paths(config, be.name, cache_dir)
+    # Get paths deterministically from the config
+    file_path, heatmap_path, polar_path = _get_paths(config, cache_dir)
 
     if force_regen or not os.path.exists(file_path):
         print(f"[Wrapper] Generating {config.output_filename}...")
         print(f"          Method: {be.name}")
-        print(f"          Params: r={config.radius_mean_um}um, std={config.variance*100}%")
+        print(f"          Params: r={config.radius_mean_um}um, std={config.variance * 100}%")
 
         try:
             phase_table, mu, wavelengths = generate_phase_table(config, backend=be)
@@ -114,13 +116,15 @@ def create_atmospheric_phase(
                 visualize_polar_plot(file_path, polar_path)
 
         except Exception as e:
+            # Clean up the corrupted/half-written garbage so next run isn't fucked
             print(f"[Wrapper] GENERATION FAILED: {e}")
             if os.path.exists(file_path):
                 os.remove(file_path)
             raise e
     else:
-        print(f"[Wrapper] Cache Hit: {file_path}")
-        # Lazy regen of visualizations if missing
+        print(f"[Wrapper] Cache Hit: {file_path}. We take those.")
+
+        # Lazy regen of missing visualizers
         if generate_heatmap and not os.path.exists(heatmap_path):
             print("[Wrapper] Regenerating missing heatmap...")
             try:

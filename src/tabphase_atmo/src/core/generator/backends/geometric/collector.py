@@ -31,12 +31,16 @@ class CollectionSphere:
         self._bins_ex_imag = None
         self._bins_ey_real = None
         self._bins_ey_imag = None
+        self._bins_ez_real = None
+        self._bins_ez_imag = None
 
     def reset(self):
         self._bins_ex_real = dr.zeros(Float, self.total_bins)
         self._bins_ex_imag = dr.zeros(Float, self.total_bins)
         self._bins_ey_real = dr.zeros(Float, self.total_bins)
         self._bins_ey_imag = dr.zeros(Float, self.total_bins)
+        self._bins_ez_real = dr.zeros(Float, self.total_bins)
+        self._bins_ez_imag = dr.zeros(Float, self.total_bins)
 
     def _gather_ray_data_full(self, rays: PhasorRay, indices: UInt32):
         d = Array3f(
@@ -44,18 +48,36 @@ class CollectionSphere:
             dr.gather(Float, rays.direction.y, indices),
             dr.gather(Float, rays.direction.z, indices)
         )
+        bx = Array3f(
+            dr.gather(Float, rays.basis_x.x, indices),
+            dr.gather(Float, rays.basis_x.y, indices),
+            dr.gather(Float, rays.basis_x.z, indices)
+        )
+        by = Array3f(
+            dr.gather(Float, rays.basis_y.x, indices),
+            dr.gather(Float, rays.basis_y.y, indices),
+            dr.gather(Float, rays.basis_y.z, indices)
+        )
         l = dr.gather(Float, rays.opt_path_length, indices)
         f = Float(dr.gather(type(rays.focal_lines_crossed), rays.focal_lines_crossed, indices))
         ex = Complex2f(dr.gather(Float, rays.Ex.real, indices), dr.gather(Float, rays.Ex.imag, indices))
         ey = Complex2f(dr.gather(Float, rays.Ey.real, indices), dr.gather(Float, rays.Ey.imag, indices))
-        return d, l, f, ex, ey
+        return d, bx, by, l, f, ex, ey
 
-    def _apply_phasor_rotation(self, ex: Complex2f, ey: Complex2f, l: Float, f: Float):
-        phi_unwrapped = Float(self.k) * l - f * Float(np.pi / 2.0)
+    def _to_3d_complex(self, ex: Complex2f, ey: Complex2f, bx: Array3f, by: Array3f):
+        """ Projects the local 2D wave amplitudes back into the global 3D vector space """
+        c_x = Complex2f(ex.real * bx.x + ey.real * by.x, ex.imag * bx.x + ey.imag * by.x)
+        c_y = Complex2f(ex.real * bx.y + ey.real * by.y, ex.imag * bx.y + ey.imag * by.y)
+        c_z = Complex2f(ex.real * bx.z + ey.real * by.z, ex.imag * bx.z + ey.imag * by.z)
+        return c_x, c_y, c_z
+
+    def _apply_3d_phasor_rotation(self, Ex: Complex2f, Ey: Complex2f, Ez: Complex2f, l: Float, f: Float):
+        # [cite_start]Phase advance per focal line matched to Sadeghi et al. [cite: 1]
+        phi_unwrapped = Float(self.k) * l + f * Float(np.pi / 2.0)
         two_pi = Float(2.0 * np.pi)
         phi_wrapped = phi_unwrapped - dr.floor(phi_unwrapped / two_pi + Float(0.5)) * two_pi
         rotation = Complex2f(dr.cos(phi_wrapped), dr.sin(phi_wrapped))
-        return ex * rotation, ey * rotation
+        return Ex * rotation, Ey * rotation, Ez * rotation
 
     def _dir_to_continuous_coords(self, d: Array3f) -> Tuple[Float, Float]:
         theta = dr.acos(dr.clip(d.z, Float(-1.0), Float(1.0)))
@@ -64,11 +86,9 @@ class CollectionSphere:
         phi = dr.atan2(d.y, d.x)
         normalized_phi = (phi + Float(np.pi)) / Float(2.0 * np.pi)
         phi_coord = normalized_phi * Float(self.num_phi_bins)
-
         return phi_coord, theta_coord
 
     def _barycentric(self, px, py, ax, ay, bx, by, cx, cy):
-        """ Computes Barycentric coordinates for a 2D triangle """
         v0x, v0y = cx - ax, cy - ay
         v1x, v1y = bx - ax, by - ay
         v2x, v2y = px - ax, py - ay
@@ -93,94 +113,110 @@ class CollectionSphere:
         dr.scatter_add(arr_r, val_r, idx, mask)
         dr.scatter_add(arr_i, val_i, idx, mask)
 
+    @dr.syntax
     def accumulate(self, rays: PhasorRay, patches: RayPatch, patch_area: float):
         if self._bins_ex_real is None:
             self.reset()
 
-        d0, l0, f0, ex0, ey0 = self._gather_ray_data_full(rays, patches.v0)
-        d1, l1, f1, ex1, ey1 = self._gather_ray_data_full(rays, patches.v1)
-        d2, l2, f2, ex2, ey2 = self._gather_ray_data_full(rays, patches.v2)
-        d3, l3, f3, ex3, ey3 = self._gather_ray_data_full(rays, patches.v3)
+        d0, bx0, by0, l0, f0, ex0, ey0 = self._gather_ray_data_full(rays, patches.v0)
+        d1, bx1, by1, l1, f1, ex1, ey1 = self._gather_ray_data_full(rays, patches.v1)
+        d2, bx2, by2, l2, f2, ex2, ey2 = self._gather_ray_data_full(rays, patches.v2)
+        d3, bx3, by3, l3, f3, ex3, ey3 = self._gather_ray_data_full(rays, patches.v3)
 
-        # 1. STRICT SILHOUETTE CULLING
-        # If any corner has exactly zero energy, the patch bridges the physical void. Kill it.
         patch_valid = (dr.abs(ex0.real) > 1e-6) & (dr.abs(ex1.real) > 1e-6) & (dr.abs(ex2.real) > 1e-6) & (
                     dr.abs(ex3.real) > 1e-6)
 
+        # [cite_start]Geometric Focusing / Density Estimation Scale [cite: 1]
         cross1 = dr.cross(d1 - d0, d2 - d0)
         cross2 = dr.cross(d3 - d1, d2 - d1)
-
-        # Norm of the cross product is twice the triangle area
-        s_i = 0.5 * (dr.norm(cross1) + dr.norm(cross2))
-
-        # Protect against division by zero at the exact caustic singularity
-        s_i = dr.maximum(s_i, Float(1e-12))
-
-        # Apply Sadeghi's amplitude scaling factor: sqrt(a_i / s_i)
+        s_i = dr.maximum(0.5 * (dr.norm(cross1) + dr.norm(cross2)), Float(1e-12))
         amp_scale = dr.sqrt(Float(patch_area) / s_i)
 
-        ex0 *= amp_scale
-        ey0 *= amp_scale
-        ex1 *= amp_scale
-        ey1 *= amp_scale
-        ex2 *= amp_scale
-        ey2 *= amp_scale
-        ex3 *= amp_scale
-        ey3 *= amp_scale
+        # Reconstruct full 3D fields BEFORE interpolating
+        E0_x, E0_y, E0_z = self._to_3d_complex(ex0 * amp_scale, ey0 * amp_scale, bx0, by0)
+        E1_x, E1_y, E1_z = self._to_3d_complex(ex1 * amp_scale, ey1 * amp_scale, bx1, by1)
+        E2_x, E2_y, E2_z = self._to_3d_complex(ex2 * amp_scale, ey2 * amp_scale, bx2, by2)
+        E3_x, E3_y, E3_z = self._to_3d_complex(ex3 * amp_scale, ey3 * amp_scale, bx3, by3)
 
-        # 2. CONTINUOUS COORDINATES
         phi0, th0 = self._dir_to_continuous_coords(d0)
         phi1, th1 = self._dir_to_continuous_coords(d1)
         phi2, th2 = self._dir_to_continuous_coords(d2)
         phi3, th3 = self._dir_to_continuous_coords(d3)
 
-        # 3. BOUNDING BOX
+        # Azimuthal Wrapping Safety Protocol
+        half_phi = Float(self.num_phi_bins / 2.0)
+        max_phi_val = Float(self.num_phi_bins)
+        phi1 = dr.select(phi1 - phi0 > half_phi, phi1 - max_phi_val,
+                         dr.select(phi1 - phi0 < -half_phi, phi1 + max_phi_val, phi1))
+        phi2 = dr.select(phi2 - phi0 > half_phi, phi2 - max_phi_val,
+                         dr.select(phi2 - phi0 < -half_phi, phi2 + max_phi_val, phi2))
+        phi3 = dr.select(phi3 - phi0 > half_phi, phi3 - max_phi_val,
+                         dr.select(phi3 - phi0 < -half_phi, phi3 + max_phi_val, phi3))
+
         min_phi = dr.floor(dr.minimum(dr.minimum(phi0, phi1), dr.minimum(phi2, phi3)))
         max_phi = dr.ceil(dr.maximum(dr.maximum(phi0, phi1), dr.maximum(phi2, phi3)))
         min_th = dr.floor(dr.minimum(dr.minimum(th0, th1), dr.minimum(th2, th3)))
         max_th = dr.ceil(dr.maximum(dr.maximum(th0, th1), dr.maximum(th2, th3)))
 
-        # 4. SOFTWARE RASTERIZATION LOOP (5x5 Maximum Footprint)
-        for dx in range(5):
-            for dy in range(5):
-                target_phi = min_phi + Float(dx)
-                target_th = min_th + Float(dy)
+        # Dynamic Footprint
+        w = dr.maximum(max_phi - min_phi + Float(1.0), Float(1.0))
+        h = dr.maximum(max_th - min_th + Float(1.0), Float(1.0))
+        max_idx = UInt32(dr.minimum(w * h, Float(256)))  # Let it span up to 16x16 safely
 
-                active = (target_phi <= max_phi) & (target_th <= max_th) & patch_valid
+        idx = dr.zeros(UInt32, dr.width(min_phi))
 
-                # Split quad into two triangles.
-                # T1: v0(top-left), v1(top-right), v2(bottom-left)
-                in_t1, u1, v1, w1 = self._barycentric(target_phi, target_th, phi0, th0, phi1, th1, phi2, th2)
+        while idx < max_idx:
+            dx = Float(idx % UInt32(w))
+            dy = Float(idx // UInt32(w))
 
-                # T2: v3(bottom-right), v2(bottom-left), v1(top-right)
-                in_t2, u2, v2, w2 = self._barycentric(target_phi, target_th, phi3, th3, phi2, th2, phi1, th1)
+            target_phi = min_phi + dx
+            target_th = min_th + dy
+            active = (target_phi <= max_phi) & (target_th <= max_th) & patch_valid
 
-                hit_active = active & (in_t1 | in_t2)
+            # Modulo math for correct array mapping in case of wrapping
+            phi_idx = UInt32(target_phi + max_phi_val) % self.num_phi_bins
+            th_idx = UInt32(dr.clip(target_th, 0.0, self.num_mu_bins - 1))
+            flat_idx = phi_idx * self.num_mu_bins + th_idx
 
-                # 5. EXACT INTERPOLATION
-                l_interp = dr.select(in_t1, l0 * u1 + l1 * v1 + l2 * w1, l3 * u2 + l2 * v2 + l1 * w2)
-                f_interp = Float(dr.round(dr.select(in_t1, f0 * u1 + f1 * v1 + f2 * w1, f3 * u2 + f2 * v2 + f1 * w2)))
+            in_t1, u1, v1, w1 = self._barycentric(target_phi, target_th, phi0, th0, phi1, th1, phi2, th2)
+            in_t2, u2, v2, w2 = self._barycentric(target_phi, target_th, phi3, th3, phi2, th2, phi1, th1)
 
-                ex_interp = dr.select(in_t1, ex0 * u1 + ex1 * v1 + ex2 * w1, ex3 * u2 + ex2 * v2 + ex1 * w2)
-                ey_interp = dr.select(in_t1, ey0 * u1 + ey1 * v1 + ey2 * w1, ey3 * u2 + ey2 * v2 + ey1 * w2)
+            # --- INDEPENDENT 3D PHASOR EVALUATION ---
+            l1_val = l0 * u1 + l1 * v1 + l2 * w1
+            ex1_x = E0_x * u1 + E1_x * v1 + E2_x * w1
+            ex1_y = E0_y * u1 + E1_y * v1 + E2_y * w1
+            ex1_z = E0_z * u1 + E1_z * v1 + E2_z * w1
+            px1, py1, pz1 = self._apply_3d_phasor_rotation(ex1_x, ex1_y, ex1_z, l1_val, f0)
 
-                # 6. PHASOR ROTATION AT THE BIN
-                px, py = self._apply_phasor_rotation(ex_interp, ey_interp, l_interp, f_interp)
+            l2_val = l3 * u2 + l2 * v2 + l1 * w2
+            ex2_x = E3_x * u2 + E2_x * v2 + E1_x * w2
+            ex2_y = E3_y * u2 + E2_y * v2 + E1_y * w2
+            ex2_z = E3_z * u2 + E2_z * v2 + E1_z * w2
+            px2, py2, pz2 = self._apply_3d_phasor_rotation(ex2_x, ex2_y, ex2_z, l2_val, f0)
 
-                # 7. ATOMIC SPLAT
-                phi_idx = UInt32(target_phi) % self.num_phi_bins
-                th_idx = UInt32(dr.clip(target_th, 0.0, self.num_mu_bins - 1))
-                flat_idx = phi_idx * self.num_mu_bins + th_idx
+            # --- THE 3D INTERFERENCE SUM ---
+            valid_t1 = active & in_t1
+            valid_t2 = active & in_t2
 
-                self._scatter_cplx(self._bins_ex_real, self._bins_ex_imag, px.real, px.imag, flat_idx, hit_active)
-                self._scatter_cplx(self._bins_ey_real, self._bins_ey_imag, py.real, py.imag, flat_idx, hit_active)
+            px_final = dr.select(valid_t1, px1, Complex2f(0.0)) + dr.select(valid_t2, px2, Complex2f(0.0))
+            py_final = dr.select(valid_t1, py1, Complex2f(0.0)) + dr.select(valid_t2, py2, Complex2f(0.0))
+            pz_final = dr.select(valid_t1, pz1, Complex2f(0.0)) + dr.select(valid_t2, pz2, Complex2f(0.0))
+
+            hit_any = valid_t1 | valid_t2
+
+            self._scatter_cplx(self._bins_ex_real, self._bins_ex_imag, px_final.real, px_final.imag, flat_idx, hit_any)
+            self._scatter_cplx(self._bins_ey_real, self._bins_ey_imag, py_final.real, py_final.imag, flat_idx, hit_any)
+            self._scatter_cplx(self._bins_ez_real, self._bins_ez_imag, pz_final.real, pz_final.imag, flat_idx, hit_any)
+
+            idx += 1
 
     def finalize(self) -> np.ndarray:
         omega_1d = np.tile(self._solid_angles_1d, self.num_phi_bins)
-        omega_dr = Float(omega_1d)
 
+        # Unpolarized light approximation tracks independent X, Y, Z complex fields
         intensity = (self._bins_ex_real ** 2 + self._bins_ex_imag ** 2 +
-                     self._bins_ey_real ** 2 + self._bins_ey_imag ** 2) / omega_dr
+                     self._bins_ey_real ** 2 + self._bins_ey_imag ** 2 +
+                     self._bins_ez_real ** 2 + self._bins_ez_imag ** 2)
 
         intensity_2d = np.array(intensity).reshape((self.num_phi_bins, self.num_mu_bins))
         intensity_1d = np.mean(intensity_2d, axis=0)

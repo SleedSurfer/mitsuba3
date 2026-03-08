@@ -12,3 +12,5 @@ class PhasorRay():
     Ey: Complex2f
     opt_path_length: Float
     focal_lines_crossed: Int  # Number of focal lines traversed
+    basis_x: Array3f
+    basis_y: Array3f

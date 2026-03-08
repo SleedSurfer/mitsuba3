@@ -7,10 +7,10 @@ mi.set_variant("llvm_spectral")
 from accumulation_bench.engine import run_render_bench
 from accumulation_bench.bench_scenes import street_lamps, brocken_spectre, pure_rainbow,  cornell_exact
 from accumulation_bench.bench_scenes_win import pure_rainbow as rainbow
-from src.core.config import MieConfig
+from src.core.config import MieConfig, BackendType
 # --- CONFIG ---
 CONFIG = {
-    'target_spp': 8192,
+    'target_spp': 2560,
     'batch_size': 256,
     'res_w': 1024,
     'res_h': 1024,
@@ -28,122 +28,164 @@ if __name__ == "__main__":
     #     config=CONFIG
     # )
 
-    cfg = MieConfig(radius_mean_um=300.0, variance=0.0, num_angles=8192, num_wavelengths=32,
-                    brute_force_integration=True)
-    scene_dict = pure_rainbow.get_scene(CONFIG,cfg)
+    # cfg = MieConfig(radius_mean_um=120.0,
+    #                    variance=0.0,
+    #                    num_angles=360,
+    #                    num_wavelengths=10,
+    #                    brute_force_integration=True,
+    #                    note="backend_visual_differences_hybrid",
+    #                    backend=BackendType.HYBRID)
+    # scene_dict = pure_rainbow.get_scene(CONFIG,cfg)
+    # run_render_bench(
+    #     scene_dict,
+    #     run_name="backend_visual_differences_hybrid",
+    #     config=CONFIG,
+    # )
+
+    # cfg = MieConfig(radius_mean_um=120.0,
+    #                 variance=0.0,
+    #                 num_angles=360,
+    #                 num_wavelengths=10,
+    #                 brute_force_integration=True,
+    #                 note="backend_visual_differences_mie",
+    #                 backend=BackendType.MIEPYTHON)
+    # scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+    # run_render_bench(
+    #     scene_dict,
+    #     run_name="backend_visual_differences_mie",
+    #     config=CONFIG,
+    # )
+
+    cfg = MieConfig(radius_mean_um=120.0,
+                    variance=0.0,
+                    num_angles=1024,
+                    num_wavelengths=10,
+                    brute_force_integration=True,
+                    note="backend_visual_differences_rt",
+                    backend=BackendType.DRJIT)
+    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
     run_render_bench(
         scene_dict,
-        run_name="300_poly_00_32wl",
+        run_name="backend_visual_differences_rt_g2048",
         config=CONFIG,
     )
 
-    cfg = MieConfig(radius_mean_um=600.0, variance=0.1, num_angles=8192, num_wavelengths=1,
-                    brute_force_integration=True)
-    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
-    run_render_bench(
-        scene_dict,
-        run_name="600_poly_10red",
-        config=CONFIG,
-    )
+    # cfg = MieConfig(radius_mean_um=500.0, variance=0.0, num_angles=8192, num_wavelengths=64,
+    #                 brute_force_integration=True)
+    # scene_dict = pure_rainbow.get_scene(CONFIG,cfg)
+    # run_render_bench(
+    #     scene_dict,
+    #     run_name="300_poly_00_32wl",
+    #     config=CONFIG,
+    # )
 
-    cfg = MieConfig(radius_mean_um=600.0, variance=0.25, num_angles=8192, num_wavelengths=1,
-                    brute_force_integration=True)
-    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
-    run_render_bench(
-        scene_dict,
-        run_name="600_poly_25red",
-        config=CONFIG,
-    )
-
-    cfg = MieConfig(radius_mean_um=600.0, variance=0.6, num_angles=8192, num_wavelengths=1,
-                    brute_force_integration=True)
-    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
-    run_render_bench(
-        scene_dict,
-        run_name="600_poly_60red",
-        config=CONFIG,
-    )
-   #----------------------------------------------------------------------------------------
-   #----------------------------------------------------------------------------------------
-   #----------------------------------------------------------------------------------------
-   #----------------------------------------------------------------------------------------
-   #----------------------------------------------------------------------------------------
-    cfg = MieConfig(radius_mean_um=600.0, variance=0.0, num_angles=8192, num_wavelengths=32,
-                    brute_force_integration=True)
-    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
-    run_render_bench(
-        scene_dict,
-        run_name="600_poly_00",
-        config=CONFIG,
-    )
-
-    cfg = MieConfig(radius_mean_um=600.0, variance=0.1, num_angles=8192, num_wavelengths=32,
-                    brute_force_integration=True)
-    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
-    run_render_bench(
-        scene_dict,
-        run_name="600_poly_10",
-        config=CONFIG,
-    )
-
-    cfg = MieConfig(radius_mean_um=600.0, variance=0.25, num_angles=8192, num_wavelengths=32,
-                    brute_force_integration=True)
-    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
-    run_render_bench(
-        scene_dict,
-        run_name="600_poly_25",
-        config=CONFIG,
-    )
-
-    cfg = MieConfig(radius_mean_um=600.0, variance=0.6, num_angles=8192, num_wavelengths=32,
-                    brute_force_integration=True)
-    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
-    run_render_bench(
-        scene_dict,
-        run_name="600_poly_60",
-        config=CONFIG,
-    )
-    # ----------------------------------------------------------------------------------------
-    # ----------------------------------------------------------------------------------------
-    # ----------------------------------------------------------------------------------------
-    # ----------------------------------------------------------------------------------------
-    # ----------------------------------------------------------------------------------------
-
-    cfg = MieConfig(radius_mean_um=200.0, variance=0.0, num_angles=8192, num_wavelengths=32,
-                    brute_force_integration=True)
-    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
-    run_render_bench(
-        scene_dict,
-        run_name="200_poly_00",
-        config=CONFIG,
-    )
-
-    cfg = MieConfig(radius_mean_um=200.0, variance=0.1, num_angles=8192, num_wavelengths=32,
-                    brute_force_integration=True)
-    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
-    run_render_bench(
-        scene_dict,
-        run_name="200_poly_10",
-        config=CONFIG,
-    )
-
-    cfg = MieConfig(radius_mean_um=200.0, variance=0.25, num_angles=8192, num_wavelengths=32,
-                    brute_force_integration=True)
-    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
-    run_render_bench(
-        scene_dict,
-        run_name="200_poly_25",
-        config=CONFIG,
-    )
-
-    cfg = MieConfig(radius_mean_um=200.0, variance=0.6, num_angles=8192, num_wavelengths=32,
-                    brute_force_integration=True)
-    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
-    run_render_bench(
-        scene_dict,
-        run_name="200_poly_60",
-        config=CONFIG,
-    )
+   #  cfg = MieConfig(radius_mean_um=600.0, variance=0.1, num_angles=8192, num_wavelengths=1,
+   #                  brute_force_integration=True)
+   #  scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+   #  run_render_bench(
+   #      scene_dict,
+   #      run_name="600_poly_10red",
+   #      config=CONFIG,
+   #  )
+   #
+   #  cfg = MieConfig(radius_mean_um=600.0, variance=0.25, num_angles=8192, num_wavelengths=1,
+   #                  brute_force_integration=True)
+   #  scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+   #  run_render_bench(
+   #      scene_dict,
+   #      run_name="600_poly_25red",
+   #      config=CONFIG,
+   #  )
+   #
+   #  cfg = MieConfig(radius_mean_um=600.0, variance=0.6, num_angles=8192, num_wavelengths=1,
+   #                  brute_force_integration=True)
+   #  scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+   #  run_render_bench(
+   #      scene_dict,
+   #      run_name="600_poly_60red",
+   #      config=CONFIG,
+   #  )
+   # #----------------------------------------------------------------------------------------
+   # #----------------------------------------------------------------------------------------
+   # #----------------------------------------------------------------------------------------
+   # #----------------------------------------------------------------------------------------
+   # #----------------------------------------------------------------------------------------
+   #  cfg = MieConfig(radius_mean_um=600.0, variance=0.0, num_angles=8192, num_wavelengths=32,
+   #                  brute_force_integration=True)
+   #  scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+   #  run_render_bench(
+   #      scene_dict,
+   #      run_name="600_poly_00",
+   #      config=CONFIG,
+   #  )
+   #
+   #  cfg = MieConfig(radius_mean_um=600.0, variance=0.1, num_angles=8192, num_wavelengths=32,
+   #                  brute_force_integration=True)
+   #  scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+   #  run_render_bench(
+   #      scene_dict,
+   #      run_name="600_poly_10",
+   #      config=CONFIG,
+   #  )
+   #
+   #  cfg = MieConfig(radius_mean_um=600.0, variance=0.25, num_angles=8192, num_wavelengths=32,
+   #                  brute_force_integration=True)
+   #  scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+   #  run_render_bench(
+   #      scene_dict,
+   #      run_name="600_poly_25",
+   #      config=CONFIG,
+   #  )
+   #
+   #  cfg = MieConfig(radius_mean_um=600.0, variance=0.6, num_angles=8192, num_wavelengths=32,
+   #                  brute_force_integration=True)
+   #  scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+   #  run_render_bench(
+   #      scene_dict,
+   #      run_name="600_poly_60",
+   #      config=CONFIG,
+   #  )
+   #  # ----------------------------------------------------------------------------------------
+   #  # ----------------------------------------------------------------------------------------
+   #  # ----------------------------------------------------------------------------------------
+   #  # ----------------------------------------------------------------------------------------
+   #  # ----------------------------------------------------------------------------------------
+   #
+   #  cfg = MieConfig(radius_mean_um=200.0, variance=0.0, num_angles=8192, num_wavelengths=32,
+   #                  brute_force_integration=True)
+   #  scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+   #  run_render_bench(
+   #      scene_dict,
+   #      run_name="200_poly_00",
+   #      config=CONFIG,
+   #  )
+   #
+   #  cfg = MieConfig(radius_mean_um=200.0, variance=0.1, num_angles=8192, num_wavelengths=32,
+   #                  brute_force_integration=True)
+   #  scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+   #  run_render_bench(
+   #      scene_dict,
+   #      run_name="200_poly_10",
+   #      config=CONFIG,
+   #  )
+   #
+   #  cfg = MieConfig(radius_mean_um=200.0, variance=0.25, num_angles=8192, num_wavelengths=32,
+   #                  brute_force_integration=True)
+   #  scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+   #  run_render_bench(
+   #      scene_dict,
+   #      run_name="200_poly_25",
+   #      config=CONFIG,
+   #  )
+   #
+   #  cfg = MieConfig(radius_mean_um=200.0, variance=0.6, num_angles=8192, num_wavelengths=32,
+   #                  brute_force_integration=True)
+   #  scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+   #  run_render_bench(
+   #      scene_dict,
+   #      run_name="200_poly_60",
+   #      config=CONFIG,
+   #  )
     # ----------------------------------------------------------------------------------------
     # ----------------------------------------------------------------------------------------
     # ----------------------------------------------------------------------------------------

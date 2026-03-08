@@ -25,20 +25,15 @@ def test_raytracer_explicit():
         print(f"❌ [Dr.Jit] No JIT backend found! This will be slow/broken.")
 
 
-    params = MieConfig(radius_mean_um=400.0, variance=0.0, num_angles=8192,num_wavelengths=8, brute_force_integration=True)
-
-    # params = {
-    #         "radius_mean_um": 50.0,  # 1.5mm (Huge drop)
-    #         "radius_std_um": 2.0,  # Very uniform size
-    #         "num_angles": 1024,  # High res to see the spike
-    #         "num_wavelengths": 16,  # Keep it fast
-    #         "backend": "jit_traced",  # <--- EXPLICIT CALL
-    #         "force_regen": True,  # Force it to run
-    #         "note": "test_small_droplets"
-    # }
+    params = MieConfig(radius_mean_um=120.0,
+                       variance=0.0,
+                       num_angles=8192,
+                       num_wavelengths=10,
+                       brute_force_integration=True,
+                       note="backend_visual_differences_hybrid")
 
     try:
-        result = create_atmospheric_phase(params,force_regen=True)
+        result = create_atmospheric_phase(params,backend="auto",force_regen=True)
         filepath = result['filename']
         print(f"✅ [Success] Wrapper finished. Output: {filepath}")
     except Exception as e:
