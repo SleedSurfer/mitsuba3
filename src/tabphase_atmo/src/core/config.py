@@ -48,7 +48,8 @@ class MieConfig:
             if self.variance <= 0.0 or not self.brute_force_integration:
                 self.num_samples = 1
             else:
-                self.num_samples = int(np.clip(300.0 * self.variance, 16, 256))
+                # Gauss-Hermite is hyper-efficient. 24 is the absolute ceiling for visual accuracy.
+                self.num_samples = 16
 
     @property
     def output_filename(self) -> str:

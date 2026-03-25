@@ -69,7 +69,6 @@ public:
                 double mu1 = std::cos(theta1);
                 double d_mu = mu0 - mu1;
 
-                // Lookup raw values (Interleaved layout: [Angle][Channel])
                 float p0 = host_data[(i - 1) * m_num_channels + c];
                 float p1 = host_data[i * m_num_channels + c];
 
@@ -127,7 +126,7 @@ public:
 
         Float pdf = 0.f;
         if constexpr (is_spectral_v<Spectrum>) {
-             // For spectral modes (Mono channel)
+             // Mono
              pdf = value[0] / norm;
         } else {
              // For RGB modes (scalar_rgb), 'value' is a Color<float, 3>
@@ -228,7 +227,8 @@ private:
             }
             return result;
         } else {
-            return 0.f;
+            Throw("AtmosphericPhase is wavelength dependent and needs spectral variant to work.");
+            return 0.f;;
         }
     }
 
@@ -246,7 +246,6 @@ private:
             hi = dr::select(go_left, mid, hi);
             lo = dr::select(go_left, lo, mid + 1u);
         }
-
         UInt32 idx = dr::minimum(lo, UInt32(m_resolution - 1));
         UInt32 idx0 = dr::select(idx > 0u, idx - 1u, 0u);
 

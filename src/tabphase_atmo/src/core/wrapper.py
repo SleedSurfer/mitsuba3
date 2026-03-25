@@ -86,10 +86,9 @@ def create_atmospheric_phase(
         hybrid_x1=850.0,
         x_go_only=850.0
 ):
-    # The config is the captain now.
     be = _resolve_backend(config.backend)
     print(f"[Wrapper] Selected backend: {config.backend.name} -> {be.name if be else 'Auto (Hybrid Fallback)'}")
-    if be is None:  # Auto mode fallback
+    if be is None:  # Auto mode fallback DEPRECATED TODO TODO TODO please
         print(f"[Wrapper] Auto-select enabled. Defaulting to Hybrid (Mie + Raytracer) to stay safe.")
         be = HybridBackend(
             MiePythonBackend(),
@@ -97,8 +96,6 @@ def create_atmospheric_phase(
             x0=800.0,
             x1=1400.0
         )
-
-    # Get paths deterministically from the config
     file_path, heatmap_path, polar_path = _get_paths(config, cache_dir)
 
     if force_regen or not os.path.exists(file_path):

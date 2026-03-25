@@ -6,6 +6,7 @@ from joblib import Parallel, delayed
 import multiprocessing
 from scipy import stats
 from numpy.polynomial.hermite import hermgauss
+import multiprocessing
 
 from .lobe_analyzer import analyze_lut_for_mis, write_mis_metadata
 from ..config import MieConfig
@@ -22,7 +23,6 @@ def _compute_lognormal_params(radius_eff_um, cv):
     if cv <= 0:
         return np.log(radius_eff_um), 1e-10
 
-    # Your input "variance" percentage is actually the Coefficient of Variation (CV)
     # In atmospheric optics, effective variance (v_eff) is exactly CV^2
     v_eff = cv ** 2
 
@@ -30,9 +30,6 @@ def _compute_lognormal_params(radius_eff_um, cv):
     sigma_squared = np.log(1.0 + v_eff)
     sigma = np.sqrt(sigma_squared)
 
-    # THE FIX: Anchor the log-normal location parameter mu to the
-    # EFFECTIVE optical radius, not the arithmetic number mean.
-    # r_eff = exp(mu + 2.5 * sigma^2)  -->  mu = ln(r_eff) - 2.5 * sigma^2
     mu = np.log(radius_eff_um) - 2.5 * sigma_squared
 
     return (mu, sigma)
@@ -87,7 +84,6 @@ def _process_wavelength_brute(w_nm, index, radii, weights, backend, config):
 
     intensity_cheb = np.zeros_like(mu_cheb)
 
-    # 1. Brutalize the CPU over N particles
     for j, r_um in enumerate(radii):
         intensity_cheb += weights[j] * backend.intensity_unpolarized(m, w_nm, r_um, mu_cheb)
 
@@ -103,43 +99,57 @@ def generate_phase_table(config: MieConfig, backend: ScatteringBackend):
     theta = np.linspace(0, np.pi, config.num_angles)
     mu = np.cos(theta)
     wavelengths = np.linspace(config.min_wavelength, config.max_wavelength, config.num_wavelengths)
-    num_cores = multiprocessing.cpu_count()
+
+    num_cores = min(6, max(1, multiprocessing.cpu_count() - 2))
 
     print(f"[Gen] Generating Phase Table on {num_cores} CORES...")
     print(f"[Gen]   Config: {config.output_filename}")
 
-    # --- ROUTER ---
+    # ==========================================
+    # 1. THE PRE-WARM (Single Thread)
+    # ==========================================
+    # Compiles the AST kernel and writes to the SSD safely so the pool workers don't fight. TODO dont touch
+    print(f"[Gen] Pre-warming JIT Cache for Reff={config.radius_mean_um:.2f}...")
+    prewarm_results = []
+
     if config.brute_force_integration:
-        # 32 nodes with Gauss-Hermite is usually equivalent to like 1000 linear samples
-        num_nodes = max(config.num_samples, 32) if config.num_samples > 1 else 1
+        num_nodes = max(config.num_samples, 16) if config.num_samples > 1 else 1
         print(f"[Gen]   Mode: SMART BRUTE FORCE ({num_nodes} Quadrature Nodes)")
 
         mu_log, sigma_log = _compute_lognormal_params(config.radius_mean_um, config.variance)
-
-        # Get optimal Gaussian nodes and weights
         x_nodes, w_nodes = hermgauss(num_nodes)
-
-        # Transform nodes from standard normal space to our specific log-normal radii
         radii = np.exp(np.sqrt(2.0) * sigma_log * x_nodes + mu_log)
-
-        # The probability distribution is inherently baked into w_nodes!
-        # We just multiply by r^2 to account for the physical scattering cross-section area
         weights = (w_nodes / np.sqrt(np.pi)) * (radii ** 2)
-
-        # Normalize weights so we don't blow up the energy
         weights /= np.sum(weights)
 
-        results = Parallel(n_jobs=-1)(
-            delayed(_process_wavelength_brute)(w, i, radii, weights, backend, config)
-            for i, w in enumerate(wavelengths)
-        )
+        # Execute the first wavelength synchronously
+        first_res = _process_wavelength_brute(wavelengths[0], 0, radii, weights, backend, config)
+        prewarm_results.append(first_res)
+
+        # Pack args for the rest (skip index 0)
+        args_list = [(w, i, radii, weights, backend, config) for i, w in enumerate(wavelengths) if i > 0]
+        target_func = _process_wavelength_brute
+
     else:
         print(f"[Gen]   Mode: FAST CONVOLUTION (1 Particle + Angular Blur)")
-        results = Parallel(n_jobs=-1)(
-            delayed(_process_wavelength_fast)(w, i, backend, config)
-            for i, w in enumerate(wavelengths)
-        )
 
+        first_res = _process_wavelength_fast(wavelengths[0], 0, backend, config)
+        prewarm_results.append(first_res)
+
+        args_list = [(w, i, backend, config) for i, w in enumerate(wavelengths) if i > 0]
+        target_func = _process_wavelength_fast
+
+    print("[Gen] Cache pre-warm complete. Unleashing the guillotine pool.")
+
+    # ==========================================
+    # 2. THE GUILLOTINE POOL (Multi Thread)
+    # ==========================================
+    # maxtasksperchild=1 forces the worker to die and release C++ memory after every task
+    with multiprocessing.Pool(processes=num_cores, maxtasksperchild=1) as pool:
+        pool_results = pool.starmap(target_func, args_list)
+
+    # Merge and sort
+    results = prewarm_results + pool_results
     results.sort(key=lambda x: x[0])
 
     phase_table = np.zeros((config.num_wavelengths, config.num_angles), dtype=np.float32)

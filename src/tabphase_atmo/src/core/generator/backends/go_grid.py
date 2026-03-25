@@ -21,6 +21,8 @@ class DrJitRaytracerBackend(ScatteringBackend):
     def intensity_unpolarized(self, m: complex, wavelength_nm: float, radius_um: float, mu: np.ndarray) -> np.ndarray:
         radius_mm = radius_um / 1000.0
 
+        ior_real_dr = dr.opaque(Float, float(m.real))
+        ior_inv_dr = dr.opaque(Float, 1.0 / float(m.real))
         if self.particle_shape == "sphere":
             particle = SphericalParticle(radius_mm=radius_mm)
         else:
@@ -49,7 +51,9 @@ class DrJitRaytracerBackend(ScatteringBackend):
         exiting_wavefronts = []
         thetas_to_eval = []
 
+        # ==========================================
         # BOUNCE 0
+        # ==========================================
         hit_mask, t = particle.intersect(active_rays)
         safe_t = dr.select(hit_mask, t, Float(0.0))
 
@@ -57,8 +61,7 @@ class DrJitRaytracerBackend(ScatteringBackend):
         active_rays.Ey *= dr.select(hit_mask, Complex2f(1.0, 0.0), Complex2f(0.0, 0.0))
         active_rays.opt_path_length += safe_t * 1.0
 
-        # Note: update particle.scatter to return is_tir at the end!
-        out = particle.scatter(active_rays, hit_mask, safe_t, ior_water=m.real)
+        out = particle.scatter(active_rays, hit_mask, safe_t, ior_water=ior_real_dr)
         d_refl, d_refr, r_perp, r_para, t_perp, t_para, normals, is_tir = out
 
         surface_o = active_rays.origin + active_rays.direction * safe_t
@@ -96,13 +99,16 @@ class DrJitRaytracerBackend(ScatteringBackend):
         active_rays.basis_x = b_x_refr
         active_rays.basis_y = b_y_refr
 
+        # ==========================================
         # BOUNCES 1 to 3
+        # ==========================================
         for p in range(1, 4):
             hit_mask, t = particle.intersect(active_rays)
             safe_t = dr.select(hit_mask, t, Float(0.0))
-            active_rays.opt_path_length += safe_t * float(m.real)
 
-            out = particle.scatter(active_rays, hit_mask, safe_t, ior_water=1.0 / m.real)
+            active_rays.opt_path_length += safe_t * ior_real_dr
+
+            out = particle.scatter(active_rays, hit_mask, safe_t, ior_water=ior_inv_dr)
             d_refl, d_refr, r_perp, r_para, t_perp, t_para, normals, is_tir = out
 
             surface_o = active_rays.origin + active_rays.direction * safe_t
@@ -117,7 +123,7 @@ class DrJitRaytracerBackend(ScatteringBackend):
             p_exit_rays.origin = dr.select(hit_mask, surface_o, active_rays.origin)
             p_exit_rays.direction = dr.select(hit_mask, d_refr, active_rays.direction)
 
-            # TIR ghost ray execution
+            # make missing rays piss off
             valid_transmission = hit_mask & ~is_tir
             p_exit_rays.Ex = dr.select(valid_transmission, E_x_exit, Complex2f(0.0, 0.0))
             p_exit_rays.Ey = dr.select(valid_transmission, E_y_exit, Complex2f(0.0, 0.0))
@@ -148,7 +154,6 @@ class DrJitRaytracerBackend(ScatteringBackend):
         dr.set_grad(b_impact, 1.0)
         dr.forward_to(*thetas_to_eval, flags=dr.ADFlag.Default | dr.ADFlag.AllowNoGrad)
 
-        # Apply Sadeghi's analytical logic
         final_wavefronts = []
         for rays, patch, p, theta_out in exiting_wavefronts:
             dtheta_db = dr.grad(theta_out)
@@ -159,8 +164,7 @@ class DrJitRaytracerBackend(ScatteringBackend):
             rays.focal_lines_crossed = type(rays.focal_lines_crossed)(base_focal + caustic_addition)
             final_wavefronts.append((rays, patch, f"p={p}"))
 
-        # Collectior Phase
-        internal_bins = 8192*2
+        internal_bins = 8192 * 2
 
         theta_internal = np.linspace(0.0, np.pi, internal_bins)
         mu_internal = np.cos(theta_internal)
@@ -169,7 +173,6 @@ class DrJitRaytracerBackend(ScatteringBackend):
         for rays, patch, name in final_wavefronts:
             collector.accumulate(rays, patch, patch_area)
 
-        # (Computes |E_p0 + E_p1 + E_p2 + E_p3|^2) for coherent wavefronts
         total_raw_intensity = collector.finalize()
         total_intensity_internal = apply_diffraction_smoothing(
             theta_rad=theta_internal,
@@ -178,11 +181,9 @@ class DrJitRaytracerBackend(ScatteringBackend):
         )
         total_intensity = total_intensity_internal
         dr.eval(total_intensity)
-
-        # Nuke the wavefront lists and explicitly free the graph
+        dr.disable_grad(b_impact)
         del exiting_wavefronts
         del final_wavefronts
-        dr.disable_grad(b_impact)
 
         integral = float(np.trapezoid(total_intensity * np.sin(theta_internal), theta_internal) * 2.0 * np.pi)
         normalized_total = (total_intensity / (integral + 1e-12)).astype(np.float32)
