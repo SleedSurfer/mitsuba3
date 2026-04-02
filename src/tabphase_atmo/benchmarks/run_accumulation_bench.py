@@ -1,5 +1,6 @@
 import mitsuba as mi
 
+from config import ParticleShape
 
 # --- VARIANT ---
 mi.set_variant("llvm_spectral")
@@ -10,16 +11,47 @@ from accumulation_bench.bench_scenes_win import pure_rainbow as rainbow
 from src.core.config import MieConfig, BackendType
 # --- CONFIG ---
 CONFIG = {
-    'target_spp': 2560,
+    'target_spp': 1280,
     'batch_size': 256,
     'res_w': 1024,
     'res_h': 1024,
     'downscale_res': (1920, 1080),
-    'show_previews': False,
+    'show_previews': True,
 }
 
 if __name__ == "__main__":
     print("Wake the fuck up samurai, we have a cpu to burn.")
+
+    cfg = MieConfig(radius_mean_um=2000.0,
+                    variance=0.0,
+                    num_angles=8192,
+                    num_phi_bins=360,
+                    num_wavelengths=32,
+                    note="oblate",
+                    backend=BackendType.DRJIT,
+                    shape=ParticleShape.OBLATE)
+    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+    run_render_bench(
+        scene_dict,
+        run_name="oblate",
+        config=CONFIG,
+    )
+
+    # cfg = MieConfig(radius_mean_um=2000.0,
+    #                 variance=0.0,
+    #                 num_angles=8192,
+    #                 num_phi_bins=360,
+    #                 num_wavelengths=1,
+    #                 note="ball",
+    #                 backend=BackendType.DRJIT,
+    #                 shape=ParticleShape.SPHERE)
+    # scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+    # run_render_bench(
+    #     scene_dict,
+    #     run_name="ball_1wl",
+    #     config=CONFIG,
+    # )
+
 
     # scene_dict = rainbow.get_scene(CONFIG)
     # run_render_bench(
@@ -30,8 +62,8 @@ if __name__ == "__main__":
 
     # cfg = MieConfig(radius_mean_um=120.0,
     #                    variance=0.0,
-    #                    num_angles=360,
-    #                    num_wavelengths=10,
+    #                    num_angles=4192,
+    #                    num_wavelengths=32,
     #                    brute_force_integration=True,
     #                    note="backend_visual_differences_hybrid",
     #                    backend=BackendType.HYBRID)
@@ -44,8 +76,8 @@ if __name__ == "__main__":
 
     # cfg = MieConfig(radius_mean_um=120.0,
     #                 variance=0.0,
-    #                 num_angles=360,
-    #                 num_wavelengths=10,
+    #                 num_angles=4192,
+    #                 num_wavelengths=32,
     #                 brute_force_integration=True,
     #                 note="backend_visual_differences_mie",
     #                 backend=BackendType.MIEPYTHON)
@@ -56,19 +88,19 @@ if __name__ == "__main__":
     #     config=CONFIG,
     # )
 
-    cfg = MieConfig(radius_mean_um=120.0,
-                    variance=0.0,
-                    num_angles=1024,
-                    num_wavelengths=10,
-                    brute_force_integration=True,
-                    note="backend_visual_differences_rt",
-                    backend=BackendType.DRJIT)
-    scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
-    run_render_bench(
-        scene_dict,
-        run_name="backend_visual_differences_rt_g2048",
-        config=CONFIG,
-    )
+    # cfg = MieConfig(radius_mean_um=120.0,
+    #                 variance=0.0,
+    #                 num_angles=8192,
+    #                 num_wavelengths=32,
+    #                 brute_force_integration=True,
+    #                 note="backend_visual_differences_rt",
+    #                 backend=BackendType.DRJIT)
+    # scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+    # run_render_bench(
+    #     scene_dict,
+    #     run_name="backend_visual_differences_rt_g2048",
+    #     config=CONFIG,
+    # )
 
     # cfg = MieConfig(radius_mean_um=500.0, variance=0.0, num_angles=8192, num_wavelengths=64,
     #                 brute_force_integration=True)

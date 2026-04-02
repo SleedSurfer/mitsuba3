@@ -8,7 +8,7 @@ def get_scene(config,phase):
 
     light_mod = 0.5
     # --- PHASE FUNCTION ---
-    phase_dict = create_atmospheric_phase(phase)
+    phase_dict = create_atmospheric_phase(phase,up_vector=(0.0, 1.0, 0.0),force_regen=True)
 
     sun_direction = [0, 0, -1]
 

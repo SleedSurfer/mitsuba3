@@ -8,14 +8,11 @@ from .generator.backends import (
     HybridBackend,
 )
 from .generator.generate import generate_phase_table, save_binary_file
-from .generator.visualize import visualize_binary_file, visualize_polar_plot
+from .generator.visualize import visualize_anisotropic
 
-from .config import MieConfig,BackendType
+from src.core.config import MieConfig, BackendType
 
-import os
-
-
-DRJIT_GRID_SIZE = 3000
+DRJIT_GRID_SIZE = 950
 
 
 def _ensure_dir(path: str) -> None:
@@ -23,12 +20,21 @@ def _ensure_dir(path: str) -> None:
         os.makedirs(path, exist_ok=True)
 
 
-def _resolve_backend(backend_enum: BackendType):
+def _resolve_backend(config: MieConfig):
     """
     Resolves the BackendType enum directly to an initialized backend instance.
     """
+    backend_enum = config.backend
+
     if backend_enum == BackendType.AUTO:
-        return None  # Let the wrapper decide the default fallback
+        print("[Backend] Auto-select enabled. Defaulting to Hybrid (Mie + Raytracer).")
+        return HybridBackend(
+            MiePythonBackend(),
+            DrJitRaytracerBackend(grid_res=950, num_batches=4, num_phi_bins=config.num_phi_bins,
+                                  particle_shape=config.shape.name.lower()),
+            x0=800.0,
+            x1=1400.0
+        )
 
     if backend_enum == BackendType.MIEPYTHON:
         return MiePythonBackend()
@@ -37,7 +43,16 @@ def _resolve_backend(backend_enum: BackendType):
         return MieReferenceBackend()
 
     if backend_enum == BackendType.DRJIT:
-        return DrJitRaytracerBackend(grid_res=DRJIT_GRID_SIZE, particle_shape="sphere")
+        # If you are forcing an oblate test via notes, you can hardcode "oblate" here for testing
+       # shape_str = "oblate" if "oblate" in config.note else config.shape.name.lower()
+        shape_str = config.shape.name.lower()
+        print(f"[Backend] Dr.Jit Raytracer selected with shape '{shape_str}' and {config.num_phi_bins} phi bins.")
+        return DrJitRaytracerBackend(
+            grid_res=500,
+            num_batches=40,
+            num_phi_bins=config.num_phi_bins,
+            particle_shape=shape_str
+        )
 
     if backend_enum == BackendType.HYBRID:
         return HybridBackend(
@@ -45,11 +60,11 @@ def _resolve_backend(backend_enum: BackendType):
             DrJitRaytracerBackend(grid_res=DRJIT_GRID_SIZE, particle_shape="sphere")
         )
 
+    # If it's none of the above, throw hands immediately.
     raise ValueError(f"Unknown backend enum '{backend_enum}'.")
 
 
 def _get_backend_cache_root(backend_enum: BackendType, cache_dir: str = "cache") -> str:
-    # Folders are now strictly named after the enum
     root = os.path.join(cache_dir, backend_enum.name.lower())
     _ensure_dir(root)
     return root
@@ -57,7 +72,7 @@ def _get_backend_cache_root(backend_enum: BackendType, cache_dir: str = "cache")
 
 def _get_paths(config: MieConfig, cache_dir: str = "cache"):
     """
-    Path generation is now totally driven by the config state. No loose arguments.
+    Path generation is now totally driven by the config state.
     """
     root = _get_backend_cache_root(config.backend, cache_dir=cache_dir)
 
@@ -76,26 +91,19 @@ def _get_paths(config: MieConfig, cache_dir: str = "cache"):
 
 def create_atmospheric_phase(
         config: MieConfig,
+        up_vector: tuple = (0.0, 1.0, 0.0),  # <--- Added gravity alignment
         force_regen=False,
         generate_heatmap=True,
         generate_polar=True,
-        cache_dir="cache",
-        # Tuning params for the Hybrid switch
-        x_mie_only=500.0,
-        hybrid_x0=500.0,
-        hybrid_x1=850.0,
-        x_go_only=850.0
-):
-    be = _resolve_backend(config.backend)
-    print(f"[Wrapper] Selected backend: {config.backend.name} -> {be.name if be else 'Auto (Hybrid Fallback)'}")
-    if be is None:  # Auto mode fallback DEPRECATED TODO TODO TODO please
-        print(f"[Wrapper] Auto-select enabled. Defaulting to Hybrid (Mie + Raytracer) to stay safe.")
-        be = HybridBackend(
-            MiePythonBackend(),
-            DrJitRaytracerBackend(grid_res=DRJIT_GRID_SIZE),
-            x0=800.0,
-            x1=1400.0
-        )
+        cache_dir="cache"):
+    be = _resolve_backend(config)
+
+    # Failsafe: if we somehow get a null backend, crash loudly.
+    if be is None:
+        raise ValueError("Backend resolution failed completely. Check your config enum and resolver.")
+
+    print(f"[Wrapper] Selected backend: {config.backend.name} -> {be.name}")
+
     file_path, heatmap_path, polar_path = _get_paths(config, cache_dir)
 
     if force_regen or not os.path.exists(file_path):
@@ -107,10 +115,8 @@ def create_atmospheric_phase(
             phase_table, mu, wavelengths = generate_phase_table(config, backend=be)
             save_binary_file(file_path, phase_table, mu, wavelengths, config)
 
-            if generate_heatmap:
-                visualize_binary_file(file_path, heatmap_path)
             if generate_polar:
-                visualize_polar_plot(file_path, polar_path)
+                visualize_anisotropic(file_path, polar_path)
 
         except Exception as e:
             # Clean up the corrupted/half-written garbage so next run isn't fucked
@@ -121,19 +127,17 @@ def create_atmospheric_phase(
     else:
         print(f"[Wrapper] Cache Hit: {file_path}. We take those.")
 
-        # Lazy regen of missing visualizers
-        if generate_heatmap and not os.path.exists(heatmap_path):
-            print("[Wrapper] Regenerating missing heatmap...")
-            try:
-                visualize_binary_file(file_path, heatmap_path)
-            except:
-                pass
-
+        # Lazy regen of missing visualizer
         if generate_polar and not os.path.exists(polar_path):
             print("[Wrapper] Regenerating missing polar plot...")
             try:
-                visualize_polar_plot(file_path, polar_path)
-            except:
-                pass
+                visualize_anisotropic(file_path, polar_path)
+            except Exception as e:
+                print(f"[Wrapper] Polar plot regen failed: {e}")
 
-    return {"type": "atmosphericphase", "filename": file_path}
+    # The dictionary now directly maps the Python tuple to the C++ 'up' Vector3f property
+    return {
+        "type": "atmosphericphase",
+        "filename": file_path,
+        "up": up_vector
+    }

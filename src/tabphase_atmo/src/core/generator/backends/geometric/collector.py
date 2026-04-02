@@ -252,6 +252,7 @@ class CollectionSphere:
             idx += 1
 
     def finalize(self) -> np.ndarray:
+        # Solid angle normalization
         omega_1d = np.tile(self._solid_angles_1d, self.num_phi_bins)
 
         # Unpolarized light approximation tracks independent X, Y, Z complex fields
@@ -259,8 +260,14 @@ class CollectionSphere:
                      self._bins_ey_real ** 2 + self._bins_ey_imag ** 2 +
                      self._bins_ez_real ** 2 + self._bins_ez_imag ** 2)
 
+        # Reshape to (Phi, Theta)
         intensity_2d = np.array(intensity).reshape((self.num_phi_bins, self.num_mu_bins))
-        intensity_1d = np.mean(intensity_2d, axis=0)
 
         self.reset()
-        return intensity_1d
+
+        # If the user only asked for 1 phi bin (spherical drop), we can average it down
+        # to save memory. Otherwise, hand back the full 2D anisotropic map.
+        if self.num_phi_bins == 1:
+            return np.mean(intensity_2d, axis=0)
+
+        return intensity_2d

@@ -1,52 +1,37 @@
 import numpy as np
 import drjit as dr
-from drjit.auto import Float, Bool, Complex2f,Array3f
+from drjit.auto import Float, Bool, Complex2f, Array3f
+import copy
 
+# Make the cache spam fuck off
+dr.set_log_level(dr.LogLevel.Error)
+
+from src.core.config import MieConfig as config
 from .base import ScatteringBackend
 from .geometric.particles.sphere import SphericalParticle
+# IMPORT THE CHUANGUS
+from .geometric.particles.oblate_sphere import OblateSpheroidParticle
+from .geometric.particles.hexagonal_ice import HexagonalCrystalParticle
 from .geometric.optics import apply_basis_rotation
 from .geometric.ray_emitter import GridEmitter
 from .geometric.collector import CollectionSphere
-from .geometric.postprocess import apply_diffraction_smoothing, compute_fraunhofer_diffraction
-import copy
-
+from .geometric.postprocess import apply_diffraction_smoothing
 
 class DrJitRaytracerBackend(ScatteringBackend):
     name: str = "drjit_raytracer"
 
-    def __init__(self, grid_res: int = 512, particle_shape: str = "sphere"):
+    def __init__(self, grid_res: int = 950, num_batches: int = 10, num_phi_bins: int = 1, particle_shape: str = "sphere"):
         self.grid_res = grid_res
+        self.num_batches = num_batches
+        self.num_phi_bins = num_phi_bins
         self.particle_shape = particle_shape
 
-    def intensity_unpolarized(self, m: complex, wavelength_nm: float, radius_um: float, mu: np.ndarray) -> np.ndarray:
-        radius_mm = radius_um / 1000.0
-
-        ior_real_dr = dr.opaque(Float, float(m.real))
-        ior_inv_dr = dr.opaque(Float, 1.0 / float(m.real))
-        if self.particle_shape == "sphere":
-            particle = SphericalParticle(radius_mm=radius_mm)
-        else:
-            raise NotImplementedError(f"Particle shape {self.particle_shape} not built yet.")
-
-        grid_width_mm = radius_mm * 2.2
-        active_rays, patches = GridEmitter.emit(self.grid_res, grid_width_mm)
-        active_rays.opt_path_length = dr.zeros(Float, dr.shape(active_rays.origin)[1])
-
-        patch_area = (grid_width_mm / self.grid_res) ** 2
-
+    def _trace_batch(self, active_rays, patches, logical_x, logical_y, particle, ior_real_dr, ior_inv_dr):
+        # Capture initial coords for the 2D gradient
         x_init = active_rays.origin.x
         y_init = active_rays.origin.y
 
-        phi = dr.atan2(y_init, x_init)  # polar angle extraction
-        b_impact = x_init ** 2 + y_init ** 2
-        dr.enable_grad(b_impact)
-
-        r_new = dr.sqrt(dr.maximum(b_impact, Float(0.0)))
-        active_rays.origin = Array3f(
-            r_new * dr.cos(phi),
-            r_new * dr.sin(phi),
-            active_rays.origin.z
-        )
+        # SCRUBBED THE USELESS POLAR CONVERSION MATH FROM HERE
 
         exiting_wavefronts = []
         thetas_to_eval = []
@@ -123,7 +108,6 @@ class DrJitRaytracerBackend(ScatteringBackend):
             p_exit_rays.origin = dr.select(hit_mask, surface_o, active_rays.origin)
             p_exit_rays.direction = dr.select(hit_mask, d_refr, active_rays.direction)
 
-            # make missing rays piss off
             valid_transmission = hit_mask & ~is_tir
             p_exit_rays.Ex = dr.select(valid_transmission, E_x_exit, Complex2f(0.0, 0.0))
             p_exit_rays.Ey = dr.select(valid_transmission, E_y_exit, Complex2f(0.0, 0.0))
@@ -150,43 +134,99 @@ class DrJitRaytracerBackend(ScatteringBackend):
             active_rays.basis_x = b_x_int
             active_rays.basis_y = b_y_int
 
-        # gradient evaluation block
-        dr.set_grad(b_impact, 1.0)
-        dr.forward_to(*thetas_to_eval, flags=dr.ADFlag.Default | dr.ADFlag.AllowNoGrad)
-
         final_wavefronts = []
         for rays, patch, p, theta_out in exiting_wavefronts:
-            dtheta_db = dr.grad(theta_out)
+            # Read from the logical grid, NOT the rotated world origins
+            u_0 = dr.gather(Float, logical_x, patch.v0)
+            v_0 = dr.gather(Float, logical_y, patch.v0)
+
+            t_0 = dr.gather(Float, theta_out, patch.v0)
+            t_1 = dr.gather(Float, theta_out, patch.v1)
+            t_2 = dr.gather(Float, theta_out, patch.v2)
+
+            dt_du = t_1 - t_0
+            dt_dv = t_2 - t_0
+
+            derivative_sign = (dt_du * u_0) + (dt_dv * v_0)
+
+            caustic_addition = dr.select(derivative_sign > 0.0, 1, 0)
             base_focal = max(0, p - 1)
-
-            # Local caustic folding (Sadeghi's derivative check)
-            caustic_addition = dr.select(dtheta_db > 0.0, 1, 0)
             rays.focal_lines_crossed = type(rays.focal_lines_crossed)(base_focal + caustic_addition)
-            final_wavefronts.append((rays, patch, f"p={p}"))
 
-        internal_bins = 8192 * 2
+            final_wavefronts.append((rays, patch))
 
+        return final_wavefronts
+
+    def intensity_unpolarized(self, m: complex, wavelength_nm: float, radius_um: float, mu: np.ndarray) -> np.ndarray:
+        radius_mm = radius_um / 1000.0
+        grid_width_mm = radius_mm * 2.2
+        patch_area = (grid_width_mm / self.grid_res) ** 2
+        step_size = grid_width_mm / (self.grid_res - 1) if self.grid_res > 1 else 0.0
+
+        ior_real_dr = dr.opaque(Float, float(m.real))
+        ior_inv_dr = dr.opaque(Float, 1.0 / float(m.real))
+
+        if self.particle_shape == "sphere":
+            particle = SphericalParticle(radius_mm=radius_mm)
+        elif self.particle_shape == "oblate":
+            # HIJACKED: Now actually uses the correct math class
+            particle = OblateSpheroidParticle(radius_mm=radius_mm)
+        elif self.particle_shape == "hexagonal":
+            particle = HexagonalCrystalParticle(radius_mm=radius_mm, height_mm=radius_mm * 2.0)
+        else:
+            raise NotImplementedError(f"Particle shape {self.particle_shape} not built yet.")
+
+        # Setup collector...
+        internal_bins = 8192
         theta_internal = np.linspace(0.0, np.pi, internal_bins)
-        mu_internal = np.cos(theta_internal)
-        collector = CollectionSphere(mu_bins=mu_internal, wavelength_nm=wavelength_nm, num_phi_bins=720)
+        collector = CollectionSphere(mu_bins=np.cos(theta_internal), wavelength_nm=wavelength_nm,
+                                     num_phi_bins=self.num_phi_bins)
 
-        for rays, patch, name in final_wavefronts:
-            collector.accumulate(rays, patch, patch_area)
+        # Pre-roll the synchronized randomness for this wavelength
+        batch_params = []
+        for b in range(self.num_batches):
+            ox = (np.random.rand() - 0.5) * step_size
+            oy = (np.random.rand() - 0.5) * step_size
+            rot = np.random.rand() * np.pi * 2.0
+            batch_params.append((ox, oy, rot))
 
-        total_raw_intensity = collector.finalize()
-        total_intensity_internal = apply_diffraction_smoothing(
-            theta_rad=theta_internal,
-            intensity=total_raw_intensity,
-            radius_mm=radius_mm,
-        )
-        total_intensity = total_intensity_internal
-        dr.eval(total_intensity)
-        dr.disable_grad(b_impact)
-        del exiting_wavefronts
-        del final_wavefronts
+        print(
+            f"      -> Running {self.num_batches} batches of {self.grid_res}x{self.grid_res} rays (Pass 1: X-Pol)...",
+            flush=True)
+        for ox, oy, rot in batch_params:
+            rays, patches, log_x, log_y = GridEmitter.emit(self.grid_res, grid_width_mm, ox, oy, rot, pol='X')
+            final_wavefronts = self._trace_batch(rays, patches, log_x, log_y, particle, ior_real_dr, ior_inv_dr)
+            for batch_rays, batch_patch in final_wavefronts:
+                collector.accumulate(batch_rays, batch_patch, patch_area)
+            dr.eval(collector._bins_ex_real, collector._bins_ey_real, collector._bins_ez_real)
 
-        integral = float(np.trapezoid(total_intensity * np.sin(theta_internal), theta_internal) * 2.0 * np.pi)
-        normalized_total = (total_intensity / (integral + 1e-12)).astype(np.float32)
+        intensity_x = collector.finalize()
 
+        print(
+            f"      -> Running {self.num_batches} batches of {self.grid_res}x{self.grid_res} rays (Pass 2: Y-Pol)...",
+            flush=True)
+        for ox, oy, rot in batch_params:
+            rays, patches, log_x, log_y = GridEmitter.emit(self.grid_res, grid_width_mm, ox, oy, rot, pol='Y')
+            final_wavefronts = self._trace_batch(rays, patches, log_x, log_y, particle, ior_real_dr, ior_inv_dr)
+            for batch_rays, batch_patch in final_wavefronts:
+                collector.accumulate(batch_rays, batch_patch, patch_area)
+            dr.eval(collector._bins_ex_real, collector._bins_ey_real, collector._bins_ez_real)
+
+        intensity_y = collector.finalize()
+
+        total_raw_intensity = (intensity_x + intensity_y) / 2.0
         theta_requested = np.arccos(np.clip(mu, -1.0, 1.0))
-        return np.interp(theta_requested, theta_internal, normalized_total)
+
+        if self.num_phi_bins == 1:
+            total_intensity = apply_diffraction_smoothing(
+                theta_rad=theta_internal,
+                intensity=total_raw_intensity,
+                radius_mm=radius_mm,
+            )
+            return np.interp(theta_requested, theta_internal, total_intensity).astype(np.float32)
+        else:
+            # 2D Anisotropic interpolation
+            result = np.zeros((self.num_phi_bins, len(mu)), dtype=np.float32)
+            for p in range(self.num_phi_bins):
+                result[p, :] = np.interp(theta_requested, theta_internal, total_raw_intensity[p, :])
+            return result

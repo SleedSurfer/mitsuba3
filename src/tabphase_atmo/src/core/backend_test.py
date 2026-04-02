@@ -2,7 +2,10 @@ import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
+
+from config import ParticleShape
 from src.core import MieConfig
+from src.core.config import BackendType
 import drjit as dr
 
 # Adjust this import to match your actual package name
@@ -25,15 +28,17 @@ def test_raytracer_explicit():
         print(f"❌ [Dr.Jit] No JIT backend found! This will be slow/broken.")
 
 
-    params = MieConfig(radius_mean_um=120.0,
+    params = MieConfig(radius_mean_um=2000.0,
                        variance=0.0,
                        num_angles=8192,
-                       num_wavelengths=10,
-                       brute_force_integration=True,
-                       note="backend_visual_differences_hybrid")
+                       num_wavelengths=1,
+                       num_phi_bins=360,
+                       shape=ParticleShape.HEXAGONAL,
+                       backend=BackendType.DRJIT,
+                       note="hexagonal")
 
     try:
-        result = create_atmospheric_phase(params,backend="auto",force_regen=True)
+        result = create_atmospheric_phase(params,force_regen=True,)
         filepath = result['filename']
         print(f"✅ [Success] Wrapper finished. Output: {filepath}")
     except Exception as e:
