@@ -30,7 +30,7 @@ def _resolve_backend(config: MieConfig):
         print("[Backend] Auto-select enabled. Defaulting to Hybrid (Mie + Raytracer).")
         return HybridBackend(
             MiePythonBackend(),
-            DrJitRaytracerBackend(grid_res=950, num_batches=4, num_phi_bins=config.num_phi_bins,
+            DrJitRaytracerBackend(grid_res=600, num_batches=4, num_phi_bins=config.num_phi_bins,
                                   particle_shape=config.shape.name.lower()),
             x0=800.0,
             x1=1400.0
@@ -43,13 +43,11 @@ def _resolve_backend(config: MieConfig):
         return MieReferenceBackend()
 
     if backend_enum == BackendType.DRJIT:
-        # If you are forcing an oblate test via notes, you can hardcode "oblate" here for testing
-       # shape_str = "oblate" if "oblate" in config.note else config.shape.name.lower()
         shape_str = config.shape.name.lower()
         print(f"[Backend] Dr.Jit Raytracer selected with shape '{shape_str}' and {config.num_phi_bins} phi bins.")
         return DrJitRaytracerBackend(
             grid_res=500,
-            num_batches=40,
+            num_batches=20,
             num_phi_bins=config.num_phi_bins,
             particle_shape=shape_str
         )
@@ -91,14 +89,13 @@ def _get_paths(config: MieConfig, cache_dir: str = "cache"):
 
 def create_atmospheric_phase(
         config: MieConfig,
-        up_vector: tuple = (0.0, 1.0, 0.0),  # <--- Added gravity alignment
+        up_vector: tuple = (0.0, 1.0, 0.0),
         force_regen=False,
         generate_heatmap=True,
         generate_polar=True,
         cache_dir="cache"):
     be = _resolve_backend(config)
 
-    # Failsafe: if we somehow get a null backend, crash loudly.
     if be is None:
         raise ValueError("Backend resolution failed completely. Check your config enum and resolver.")
 
@@ -135,7 +132,6 @@ def create_atmospheric_phase(
             except Exception as e:
                 print(f"[Wrapper] Polar plot regen failed: {e}")
 
-    # The dictionary now directly maps the Python tuple to the C++ 'up' Vector3f property
     return {
         "type": "atmosphericphase",
         "filename": file_path,

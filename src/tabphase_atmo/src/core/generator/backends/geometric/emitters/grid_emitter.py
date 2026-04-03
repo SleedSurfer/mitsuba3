@@ -1,8 +1,8 @@
 import numpy as np
 import drjit as dr
 from drjit.auto import Float, UInt32, Array3f, Complex2f
-from .models.phasor_ray import PhasorRay
-from .models.ray_patch import RayPatch
+from models.phasor_ray import PhasorRay
+from models.ray_patch import RayPatch
 
 
 class GridEmitter:
@@ -19,7 +19,6 @@ class GridEmitter:
         logical_x = Float(ix) * step - (width_mm / 2.0) + offset_x
         logical_y = Float(iy) * step - (width_mm / 2.0) + offset_y
 
-        # Rotate the geometric origins around Z
         cos_a = float(np.cos(rot_angle))
         sin_a = float(np.sin(rot_angle))
         world_x = logical_x * cos_a - logical_y * sin_a
@@ -30,7 +29,6 @@ class GridEmitter:
         rays.origin = Array3f(world_x, world_y, z)
         rays.direction = Array3f(0.0, 0.0, 1.0)
 
-        # STRICTLY FIXED TO WORLD AXES (Do not rotate these)
         rays.basis_x = Array3f(1.0, 0.0, 0.0)
         rays.basis_y = Array3f(0.0, 1.0, 0.0)
 

@@ -13,3 +13,6 @@ class Particle(Protocol):
     def scatter(self, rays: PhasorRay, hit_mask: Bool, t: Float, ior_water: float) -> Tuple[
         Array3f, Array3f, Complex2f, Complex2f, Complex2f, Complex2f, Array3f, Bool]:
         ...
+
+    def randomize_orientations(self, num_rays: int, rng):
+        ...

@@ -1,4 +1,3 @@
-import pytest
 import numpy as np
 import drjit as dr
 from drjit.auto import Float, Bool
@@ -7,7 +6,7 @@ import os
 import math
 
 from src.core.generator.backends.go_grid import DrJitRaytracerBackend
-from src.core.generator.backends.geometric.collector import CollectionSphere
+from Collectors.collector import CollectionSphere
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import your actual backend path (adjust if your folder structure differs)

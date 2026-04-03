@@ -6,8 +6,9 @@ from config import ParticleShape
 mi.set_variant("llvm_spectral")
 
 from accumulation_bench.engine import run_render_bench
-from accumulation_bench.bench_scenes import street_lamps, brocken_spectre, pure_rainbow,  cornell_exact
+from accumulation_bench.bench_scenes import street_lamps, brocken_spectre, pure_rainbow,  cornell_exact, Ice
 from accumulation_bench.bench_scenes_win import pure_rainbow as rainbow
+
 from src.core.config import MieConfig, BackendType
 # --- CONFIG ---
 CONFIG = {
@@ -22,35 +23,52 @@ CONFIG = {
 if __name__ == "__main__":
     print("Wake the fuck up samurai, we have a cpu to burn.")
 
-    cfg = MieConfig(radius_mean_um=2000.0,
+    # cfg = MieConfig(radius_mean_um=2000.0,
+    #                 variance=0.0,
+    #                 num_angles=2048,
+    #                 num_phi_bins=720,
+    #                 num_wavelengths=64,
+    #                 note="hexagonal",
+    #                 backend=BackendType.DRJIT,
+    #                 shape=ParticleShape.HEXAGONAL)
+    # scene_dict = Ice.get_scene(CONFIG, cfg)
+    # run_render_bench(
+    #     scene_dict,
+    #     run_name="hexagonal_squarephase",
+    #     config=CONFIG,
+    # )
+
+
+
+    # cfg = MieConfig(radius_mean_um=300.0,
+    #                 variance=0.0,
+    #                 num_angles=8192,
+    #                 num_phi_bins=360,
+    #                 num_wavelengths=32,
+    #                 note="oblate",
+    #                 backend=BackendType.DRJIT,
+    #                 shape=ParticleShape.OBLATE)
+    # scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
+    # run_render_bench(
+    #     scene_dict,
+    #     run_name="oblate",
+    #     config=CONFIG,
+    # )
+
+    cfg = MieConfig(radius_mean_um=100.0,
                     variance=0.0,
                     num_angles=8192,
                     num_phi_bins=360,
                     num_wavelengths=32,
-                    note="oblate",
+                    note="ball",
                     backend=BackendType.DRJIT,
-                    shape=ParticleShape.OBLATE)
+                    shape=ParticleShape.SPHERE)
     scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
     run_render_bench(
         scene_dict,
-        run_name="oblate",
+        run_name="ball_32wl_100um",
         config=CONFIG,
     )
-
-    # cfg = MieConfig(radius_mean_um=2000.0,
-    #                 variance=0.0,
-    #                 num_angles=8192,
-    #                 num_phi_bins=360,
-    #                 num_wavelengths=1,
-    #                 note="ball",
-    #                 backend=BackendType.DRJIT,
-    #                 shape=ParticleShape.SPHERE)
-    # scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
-    # run_render_bench(
-    #     scene_dict,
-    #     run_name="ball_1wl",
-    #     config=CONFIG,
-    # )
 
 
     # scene_dict = rainbow.get_scene(CONFIG)

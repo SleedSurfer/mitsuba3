@@ -15,6 +15,18 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
 
+def circularize_anisotropic_data(intensity_2d: np.ndarray) -> np.ndarray:
+    """
+    Collapses the (Phi, Theta) starfield into a 1D radial profile
+    and broadcasts it back to 2D. Perfectly simulates an infinite 3D tumble.
+    """
+    # intensity_2d shape is (num_phi_bins, num_theta_bins)
+    # Average across all Azimuths (Phi) to get the 1D scattering profile
+    radial_profile = np.mean(intensity_2d, axis=0)
+
+    # Broadcast back to the original 2D shape
+    return np.tile(radial_profile, (intensity_2d.shape[0], 1))
+
 def apply_diffraction_smoothing(
         theta_rad: np.ndarray,
         intensity: np.ndarray,

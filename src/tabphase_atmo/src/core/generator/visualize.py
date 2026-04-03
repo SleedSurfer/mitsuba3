@@ -71,10 +71,22 @@ def visualize_anisotropic(input_filename: str, output_image: str | None = None):
 
         X, Y = np.meshgrid(theta_cut, phi_deg)
 
+        # Stop using percentile for vmax on specular objects! Grab the actual peak.
         vmin = np.percentile(slice_cut, 1)
-        vmax = np.percentile(slice_cut, 99)
+        vmax = np.max(slice_cut)
 
-        im = ax1.pcolormesh(X, Y, slice_cut, shading='auto', cmap='turbo', norm=LogNorm(vmin=max(vmin, 1e-5), vmax=vmax))
+        # Idiot-proof the bounds so Matplotlib never pukes again
+        safe_vmax = max(vmax, 1e-4)
+        safe_vmin = max(vmin, 1e-5)
+
+        if safe_vmin >= safe_vmax:
+            safe_vmin = safe_vmax / 10.0
+
+        # THE FIX: Force the slice to have a microscopic floor so it renders dark purple instead of transparent white
+        safe_slice = np.maximum(slice_cut, 1e-12)
+
+        im = ax1.pcolormesh(X, Y, safe_slice, shading='auto', cmap='turbo',
+                            norm=LogNorm(vmin=safe_vmin, vmax=safe_vmax))
 
         ax1.xaxis.set_major_locator(MultipleLocator(20))
         ax1.yaxis.set_major_locator(MultipleLocator(45))
