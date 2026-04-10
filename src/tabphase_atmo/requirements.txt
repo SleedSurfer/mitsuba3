@@ -4,3 +4,4 @@ scipy
 joblib
 miepython
 matplotlib
+pillow

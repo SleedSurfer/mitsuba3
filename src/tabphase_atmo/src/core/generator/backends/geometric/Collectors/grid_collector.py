@@ -3,8 +3,8 @@ from drjit.auto import Float, Complex2f, Array3f, UInt32
 import numpy as np
 from typing import Tuple
 
-from models.phasor_ray import PhasorRay
-from models.ray_patch import RayPatch
+from ..models.phasor_ray import PhasorRay
+from ..models.ray_patch import RayPatch
 
 
 class CollectionSphere:
@@ -83,7 +83,7 @@ class CollectionSphere:
         theta = dr.acos(dr.clip(d.z, Float(-1.0), Float(1.0)))
         theta_coord = (theta / Float(np.pi)) * Float(self.num_mu_bins - 1)
 
-        phi = dr.atan2(d.y, d.x)
+        phi = dr.atan2(Float(d.y), Float(d.x))
         normalized_phi = (phi + Float(np.pi)) / Float(2.0 * np.pi)
         phi_coord = normalized_phi * Float(self.num_phi_bins)
         return phi_coord, theta_coord

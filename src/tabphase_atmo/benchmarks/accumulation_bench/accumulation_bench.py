@@ -6,6 +6,7 @@ from pathlib import Path
 import drjit as dr
 import numpy as np
 from PIL import Image
+import pyoidn
 from bench_scenes import street_lamps,godrays_columns,pure_rainbow,brocken_spectre
 
 
@@ -208,12 +209,25 @@ def run_render_bench(scene_dict, run_name):
             temp_img = acc_buffer / pass_num
             mi.util.write_bitmap(str(exr_dir / f"preview_{pass_num}_{BATCH_SIZE*pass_num}spp.exr"), temp_img)
 
-    # Final Average
+    # 1. Final Average to get your 32-bit float array
     final_image = acc_buffer / total_passes
+    final_np = np.array(final_image)  # Should be (H, W, 3) float32
+
+    print("Vaporizing fireflies with pyoidn...")
+
+    # 2. Create the Device (CPU)
+    device = pyoidn.create_device()
+
+    # 3. Create and execute the filter
+    # For OIDN 2.0+, the filter "RT" (Ray Tracing) is the standard
+    output_np = pyoidn.denoise(device, final_np, hdr=True)
+
+    # Convert the clean numpy array back to a Mitsuba Tensor
+    final_image_clean = mi.TensorXf(output_np)
 
     # 1. Save Full Res (4K)
     print("Saving Full Res (4K) Master...")
-    mi.util.write_bitmap(str(exr_dir / "render_final_4k.exr"), final_image)
+    mi.util.write_bitmap(str(exr_dir / "render_final_4k.exr"), final_image_clean)
 
     # 2. Downscale Logic
     print("Downscaling to 1080p...")

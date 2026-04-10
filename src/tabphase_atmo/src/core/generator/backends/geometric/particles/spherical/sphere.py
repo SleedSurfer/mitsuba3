@@ -2,12 +2,12 @@ import drjit as dr
 from drjit.auto import Float, Bool, Array3f, Complex2f
 from typing import Tuple
 
-from .base import Particle
-from ..models.phasor_ray import PhasorRay
-from ..optics import compute_fresnel_and_scatter
+from ..base_particle import Particle, SphericalParticle
+from ...models.phasor_ray import PhasorRay
+from ...optics import compute_fresnel_and_scatter
 
 
-class SphericalParticle(Particle):
+class SphereParticle(SphericalParticle):
     def __init__(self, radius_mm: float):
         self.radius = Float(radius_mm)
 

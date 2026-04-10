@@ -1,8 +1,8 @@
 import numpy as np
 import drjit as dr
 from drjit.auto import Float, UInt32, Array3f, Complex2f
-from models.phasor_ray import PhasorRay
-from models.ray_patch import RayPatch
+from ..models.phasor_ray import PhasorRay
+from ..models.ray_patch import RayPatch
 
 
 class GridEmitter:

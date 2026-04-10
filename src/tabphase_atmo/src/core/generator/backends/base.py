@@ -1,23 +1,26 @@
 from __future__ import annotations
-
-from typing import Protocol
+from typing import Protocol, Union
+from dataclasses import dataclass
 import numpy as np
 
+# --- STRICT SIZE STRUCTS ---
+
+@dataclass(frozen=True)
+class SphereSize:
+    r_um: float
+
+@dataclass(frozen=True)
+class HexSize:
+    c_axis_um: float
+    a_axis_um: float
+
+# Type alias for cleaner signatures
+ParticleSize = Union[SphereSize, HexSize]
+
+# --- THE PROTOCOL ---
 
 class ScatteringBackend(Protocol):
-    """
-    Backends compute unpolarized single-sphere scattering intensity I(mu)
-    for a given refractive index m and size parameter x.
-    """
-
     name: str
 
-    def intensity_unpolarized(self, m: complex, wavelength_nm: float, radius_um: float, mu: np.ndarray) -> np.ndarray:
-        """
-        Calculates the unpolarized scattering phase function.
-        m: Complex index of refraction
-        wavelength_nm: True wavelength in nanometers
-        radius_um: True particle radius in micrometers
-        mu: Cosine of scattering angles
-        """
+    def intensity_unpolarized(self, m: complex, wavelength_nm: float, mu: np.ndarray, size: ParticleSize) -> np.ndarray:
         ...

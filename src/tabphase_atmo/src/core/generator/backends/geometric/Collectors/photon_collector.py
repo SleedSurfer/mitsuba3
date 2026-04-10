@@ -1,6 +1,7 @@
 import drjit as dr
 from drjit.auto import Float, UInt32, Complex2f, Bool
 import numpy as np
+import scipy.ndimage as ndimage
 
 
 class PhotonCollectionSphere:
@@ -45,20 +46,30 @@ class PhotonCollectionSphere:
         # 4. Calculate pure energy (magnitude squared of the E field)
         energy = dr.squared_norm(rays.Ex) + dr.squared_norm(rays.Ey)
 
-        # 5. Scatter Add (Atomic add on the GPU)
+        # 5. Scatter Add (Atomic add on the GPU/CPU)
         dr.scatter_add(self.bins_intensity, energy, flat_idx, hit_mask)
 
     def finalize(self) -> np.ndarray:
         intensity_1d = np.array(self.bins_intensity)
         intensity_2d = intensity_1d.reshape((self.num_phi_bins, self.num_mu_bins))
 
-        # Normalize by solid angle so the poles aren't artificially bright
+        # 1. Convert to Density FIRST
         omega_2d = np.tile(self._solid_angles_1d, (self.num_phi_bins, 1))
-        normalized_intensity = intensity_2d / omega_2d
+        density_raw = intensity_2d / (omega_2d + 1e-12)
+
+        # 2. Blur the density (kills noise without creating black holes)
+        target_blur_deg = 0.0
+        deg_per_mu_bin = 180.0 / float(max(1, self.num_mu_bins - 1))
+        deg_per_phi_bin = 360.0 / float(max(1, self.num_phi_bins))
+
+        sigma_mu = max(1.0, target_blur_deg / deg_per_mu_bin)
+        sigma_phi = max(1.0, target_blur_deg / deg_per_phi_bin)
+
+        density_2d = ndimage.gaussian_filter(
+            density_raw,
+            sigma=(sigma_phi, sigma_mu),
+            mode=['wrap', 'nearest']
+        )
 
         self.reset()
-
-        if self.num_phi_bins == 1:
-            return np.mean(normalized_intensity, axis=0)
-
-        return normalized_intensity
+        return density_2d

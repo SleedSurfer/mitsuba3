@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from .base import ScatteringBackend
+from .base import ScatteringBackend, ParticleSize, SphereSize
 
 
 def _smoothstep(edge0: float, edge1: float, x: float) -> float:
@@ -30,20 +30,35 @@ class HybridBackend:
         self.x0 = float(x0)
         self.x1 = float(x1)
 
-    def intensity_unpolarized(self, m: complex, wavelength_nm: float, radius_um: float, mu: np.ndarray) -> np.ndarray:
+    def intensity_unpolarized(self, m: complex, wavelength_nm: float, mu: np.ndarray, size: ParticleSize) -> np.ndarray:
+        """
+        Blend between low and high backends based on size parameter x.
+        
+        Args:
+            m: Complex refractive index
+            wavelength_nm: Wavelength in nanometers
+            mu: Cosines of scattering angles
+            size: ParticleSize (must be SphereSize for hybrid Mie/Geometric)
+        
+        Returns:
+            Blended unpolarized intensity values
+        """
+        if not isinstance(size, SphereSize):
+            raise TypeError(f"HybridBackend only works with SphereSize, got {type(size).__name__}")
+        
         # Calculate x internally just for the blending weight
         wavelength_um = wavelength_nm / 1000.0
-        x = 2.0 * np.pi * radius_um / max(wavelength_um, 1e-12)
+        x = 2.0 * np.pi * size.r_um / max(wavelength_um, 1e-12)
 
         w = _smoothstep(self.x0, self.x1, x)
 
         if w <= 0.0:
-            return self.low_backend.intensity_unpolarized(m, wavelength_nm, radius_um, mu)
+            return self.low_backend.intensity_unpolarized(m, wavelength_nm, mu, size)
         if w >= 1.0:
-            return self.high_backend.intensity_unpolarized(m, wavelength_nm, radius_um, mu)
+            return self.high_backend.intensity_unpolarized(m, wavelength_nm, mu, size)
 
-        lo = self.low_backend.intensity_unpolarized(m, wavelength_nm, radius_um, mu)
-        hi = self.high_backend.intensity_unpolarized(m, wavelength_nm, radius_um, mu)
+        lo = self.low_backend.intensity_unpolarized(m, wavelength_nm, mu, size)
+        hi = self.high_backend.intensity_unpolarized(m, wavelength_nm, mu, size)
         return (1.0 - w) * lo + w * hi
 
     def get_geometric_threshold(self, wavelength_nm: float) -> float:

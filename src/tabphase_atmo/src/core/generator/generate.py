@@ -1,166 +1,220 @@
-import numpy as np
 import struct
-
-from scipy.ndimage import gaussian_filter1d
-from numpy.polynomial.hermite import hermgauss
 import multiprocessing
+import numpy as np
+from numpy.polynomial.hermite import hermgauss
+from scipy.special import j1
 
-from .lobe_analyzer import analyze_lut_for_mis, write_mis_metadata
-from ..config import MieConfig
-from ..materials import get_material_ior
-from .backends.base import ScatteringBackend
-from .backends.mie import MiePythonBackend
+# Import your new configs
+from src.core.config import BaseParticleConfig, DropletConfig, HexagonalConfig
 
+from .backends.base import ScatteringBackend,HexSize,SphereSize
+
+
+def get_airy_diffraction(theta_rad, radius_um, wavelength_nm):
+    """Computes Fraunhofer diffraction forward peak for a perfect sphere."""
+    wavelength_um = wavelength_nm / 1000.0
+    size_param = (2.0 * np.pi * radius_um) / wavelength_um
+
+    theta_safe = np.maximum(theta_rad, 1e-7)
+    u = size_param * np.sin(theta_safe)
+
+    airy_intensity = (2.0 * j1(u) / u) ** 2
+    return airy_intensity * (size_param ** 2) / (4.0 * np.pi)
+
+
+def apply_faux_polydispersity(intensity_array, theta_rad, variance):
+    """
+    Log-Space Faux Polydispersity.
+    Applies a spatially expanding blur without breaking physics/energy conservation.
+    """
+    if variance <= 0.001:
+        return intensity_array
+
+    N = len(theta_rad)
+    result_log = np.zeros_like(intensity_array)
+    d_theta = theta_rad[1] - theta_rad[0]
+    sin_theta = np.sin(theta_rad)
+
+    original_integral = np.trapezoid(intensity_array * sin_theta, theta_rad)
+    log_intensity = np.log(np.maximum(intensity_array, 1e-12))
+    x_indices = np.arange(N)
+
+    # Physical anchor for water's primary rainbow
+    theta_rbw = np.radians(138.0)
+
+    for i, theta in enumerate(theta_rad):
+        # 1. Forward Region Physics: Rings expand from 0 degrees (scales linearly)
+        spread_fwd = theta * variance
+
+        # 2. Backward Region Physics: Fringes expand from the rainbow anchor.
+        # Spacing scales as R^(-2/3) per Airy theory. We add 0.1 rad (~5 deg) of
+        # baseline distance to simulate the minor shift of the main geometric peak.
+        spread_rbw = (2.0 / 3.0) * (np.abs(theta - theta_rbw) + 0.1) * variance
+
+        blend = 0.5 * (1.0 + np.tanh((theta - np.pi / 2) * 4.0))
+
+        spread_rad = (1.0 - blend) * spread_fwd + blend * spread_rbw + 1e-5
+
+        sigma_idx = max(0.5, spread_rad / d_theta)
+
+        weights = np.exp(-0.5 * ((x_indices - i) / sigma_idx) ** 2)
+        weights /= np.sum(weights)
+
+        result_log[i] = np.sum(log_intensity * weights)
+
+    smoothed_intensity = np.exp(result_log)
+    new_integral = np.trapezoid(smoothed_intensity * sin_theta, theta_rad)
+
+    if new_integral > 1e-12:
+        smoothed_intensity *= (original_integral / new_integral)
+
+    return smoothed_intensity
 
 def _compute_lognormal_params(radius_eff_um, cv):
-    """
-    Calculates the mu and sigma for a log-normal distribution
-    anchored to the OPTICAL effective radius, not the number mean.
-    """
     if cv <= 0:
         return np.log(radius_eff_um), 1e-10
-
-    # In atmospheric optics, effective variance (v_eff) is exactly CV^2
     v_eff = cv ** 2
-
-    # Calculate the log-normal shape parameter sigma
     sigma_squared = np.log(1.0 + v_eff)
     sigma = np.sqrt(sigma_squared)
-
     mu = np.log(radius_eff_um) - 2.5 * sigma_squared
-
     return (mu, sigma)
 
 
 def _normalize_phase(intensity_linear, theta_linear):
-    """Helper to ensure energy conservation."""
     raw_integral = np.trapezoid(intensity_linear * np.sin(theta_linear), theta_linear) * 2.0 * np.pi
     return (intensity_linear / (raw_integral + 1e-12)).astype(np.float32), raw_integral
 
 
-def _process_wavelength(w_nm, index, radii, weights, backend, config):
+def _process_wavelength(w_nm, index, size_params, weights, backend, config, habit_params):
     N = config.num_angles
     theta_cheb = 0.5 * np.pi * (1.0 - np.cos(np.linspace(0, np.pi, N)))
     mu_cheb = np.cos(theta_cheb)
     theta_linear = np.linspace(0, np.pi, N)
 
-    w_clamp = max(config.min_wavelength, min(config.max_wavelength, w_nm))
-    m = get_material_ior(config.material, w_clamp)
+    # USE THE PRECOMPUTED IOR FROM THE CONFIG
+    m = config.computed_iors[index]
 
-    # Initialize with correct dimensions
     if config.num_phi_bins > 1:
         intensity_cheb = np.zeros((config.num_phi_bins, N))
     else:
         intensity_cheb = np.zeros(N)
 
-    for j, r_um in enumerate(radii):
-        intensity_cheb += weights[j] * backend.intensity_unpolarized(m, w_nm, r_um, mu_cheb)
+    for j, current_size in enumerate(size_params):
+        intensity_cheb += weights[j] * backend.intensity_unpolarized(m, w_nm, mu_cheb, current_size)
 
-    # Interpolation and Normalization
     if config.num_phi_bins > 1:
         intensity_linear = np.zeros((config.num_phi_bins, N))
-        normalized_phase = np.zeros_like(intensity_linear, dtype=np.float32)
-        raw_integral_sum = 0.0
 
+        # 1. Interpolate all rows FIRST without touching their magnitudes
         for p in range(config.num_phi_bins):
             intensity_linear[p, :] = np.interp(theta_linear, theta_cheb, intensity_cheb[p, :])
-            norm_phase, raw_int = _normalize_phase(intensity_linear[p, :], theta_linear)
-            normalized_phase[p, :] = norm_phase
-            raw_integral_sum += raw_int
-
-        raw_integral = raw_integral_sum / config.num_phi_bins
     else:
         intensity_linear = np.interp(theta_linear, theta_cheb, intensity_cheb)
+
+    # --- WAVE OPTICS & POLYDISPERSITY APPLIED IN THE WORKER ---
+    needs_diffraction = isinstance(config, DropletConfig)
+    needs_polydispersity = "variance" in habit_params and habit_params["variance"] > 0.0
+
+    if needs_diffraction:
+        diffraction_peak = get_airy_diffraction(theta_linear, habit_params["radius"], w_nm)
+        if config.num_phi_bins > 1:
+            for p in range(config.num_phi_bins):
+                intensity_linear[p, :] += diffraction_peak
+        else:
+            intensity_linear += diffraction_peak
+
+    if needs_polydispersity:
+        var = habit_params["variance"]
+        if config.num_phi_bins > 1:
+            for p in range(config.num_phi_bins):
+                intensity_linear[p, :] = apply_faux_polydispersity(intensity_linear[p, :], theta_linear, var)
+        else:
+            intensity_linear = apply_faux_polydispersity(intensity_linear, theta_linear, var)
+
+    # --- FINALLY: NORMALIZE AFTER ALL ENERGY IS ADDED ---
+    if config.num_phi_bins > 1:
+        # Calculate the global 2D integral across the sphere
+        theta_integrals = np.trapezoid(intensity_linear * np.sin(theta_linear), theta_linear, axis=1)
+        d_phi = (2.0 * np.pi) / config.num_phi_bins
+        global_integral = np.sum(theta_integrals * d_phi)
+
+        normalized_phase = (intensity_linear / (global_integral + 1e-12)).astype(np.float32)
+        raw_integral = global_integral / (2.0 * np.pi)
+    else:
         normalized_phase, raw_integral = _normalize_phase(intensity_linear, theta_linear)
 
-    print(f"  [Sim] {w_nm:.1f}nm | Integral: {raw_integral:.4f}", flush=True)
+    print(f"  [Sim] {w_nm:.1f}nm | IOR: {m:.4f} | Integral: {raw_integral:.4f}", flush=True)
 
     return index, normalized_phase
 
 
-def generate_phase_table(config: MieConfig, backend: ScatteringBackend):
-    theta = np.linspace(0, np.pi, config.num_angles)
-    mu = np.cos(theta)
-    wavelengths = np.linspace(config.min_wavelength, config.max_wavelength, config.num_wavelengths)
-
+def generate_phase_table(config: BaseParticleConfig, backend: ScatteringBackend, habit_params: dict):
+    wavelengths = np.array(config.wavelengths_nm)
     num_cores = min(6, max(1, multiprocessing.cpu_count() - 2))
-
     print(f"[Gen] Generating Phase Table on {num_cores} CORES...")
-    print(f"[Gen]   Config: {config.output_filename}")
 
-    print(f"[Gen] Pre-warming JIT Cache for Reff={config.radius_mean_um:.2f}...")
+    # Set up the single geometry trace (no more quadrature arrays!)
+    if isinstance(config, DropletConfig):
+        r_mean = habit_params["radius"]
+        print(f"[Gen] Mode: DROPLET (radius={r_mean}um)")
+        size_params = [SphereSize(r_um=r_mean)]
+        weights = np.array([1.0])
 
-    num_nodes = max(config.num_samples, 16) if config.num_samples > 1 else 1
-    print(f"[Gen]   Mode: MULTI-PARTICLE INTEGRATION ({num_nodes} Quadrature Nodes)")
+    elif isinstance(config, HexagonalConfig):
+        c_ax = habit_params["c_axis"]
+        a_ax = habit_params["a_axis"]
+        print(f"[Gen] Mode: CRYSTAL HABIT (c={c_ax}um, a={a_ax}um)")
+        size_params = [HexSize(c_axis_um=c_ax, a_axis_um=a_ax)]
+        weights = np.array([1.0])
+    else:
+        raise ValueError("Unknown Config Type in Generator")
 
-    # Setup Quadrature
-    mu_log, sigma_log = _compute_lognormal_params(config.radius_mean_um, config.variance)
-    x_nodes, w_nodes = hermgauss(num_nodes)
-    radii = np.exp(np.sqrt(2.0) * sigma_log * x_nodes + mu_log)
-    weights = (w_nodes / np.sqrt(np.pi)) * (radii ** 2)
-    weights /= np.sum(weights)
+    print("[Gen] Unleashing the pool.")
+    args_list = [(w, i, size_params, weights, backend, config, habit_params) for i, w in enumerate(wavelengths)]
 
-    # 1. THE PRE-WARM (Single Thread)
-    prewarm_results = []
-    first_res = _process_wavelength(wavelengths[0], 0, radii, weights, backend, config)
-    prewarm_results.append(first_res)
+    if args_list:
+        with multiprocessing.Pool(processes=num_cores, maxtasksperchild=1) as pool:
+            results = pool.starmap(_process_wavelength, args_list)
+    else:
+        results = []
 
-    # 2. THE GUILLOTINE POOL (Multi Thread)
-    print("[Gen] Cache pre-warm complete. Unleashing the pool.")
-    args_list = [(w, i, radii, weights, backend, config) for i, w in enumerate(wavelengths) if i > 0]
-
-    with multiprocessing.Pool(processes=num_cores, maxtasksperchild=1) as pool:
-        pool_results = pool.starmap(_process_wavelength, args_list)
-
-    # Merge and sort
-    results = prewarm_results + pool_results
     results.sort(key=lambda x: x[0])
 
-    # Dynamic allocation based on anisotropy
     if config.num_phi_bins > 1:
-        phase_table = np.zeros((config.num_wavelengths, config.num_phi_bins, config.num_angles), dtype=np.float32)
+        phase_table = np.zeros((len(wavelengths), config.num_phi_bins, config.num_angles), dtype=np.float32)
     else:
-        phase_table = np.zeros((config.num_wavelengths, config.num_angles), dtype=np.float32)
+        phase_table = np.zeros((len(wavelengths), config.num_angles), dtype=np.float32)
 
     for idx, data in results:
         phase_table[idx, ...] = data
 
-    return phase_table, mu, wavelengths
+    theta = np.linspace(0, np.pi, config.num_angles)
+
+    print("[Gen] Raytracing and Wave Optics complete. Exiting Generator.")
+
+    return phase_table, np.cos(theta), wavelengths
 
 
-def generate_mie_table(config: MieConfig = MieConfig()):
-    return generate_phase_table(config, backend=MiePythonBackend())
 
 
-import struct
-import numpy as np
-
-
-def save_binary_file(filename, phase_table, mu_vals, wavelengths, config: MieConfig):
-    # Incoming phase_table shape: (Wavelength, Phi, Theta)
-
-    # We want memory layout: (Theta, Phi, Wavelength)
-    # 1. Swap Wavelength (0) and Theta (2) -> (Theta, Phi, Wavelength)
+def save_binary_file(filename, phase_table, mu_vals, wavelengths, config: BaseParticleConfig):
+    # Same logic as before, just using BaseParticleConfig types
     if config.num_phi_bins > 1:
         phase_interleaved = np.moveaxis(phase_table, 0, -1)
-        phase_interleaved = np.swapaxes(phase_interleaved, 0, 1)  # Ensure Theta is axis 0
+        phase_interleaved = np.swapaxes(phase_interleaved, 0, 1)
     else:
-        # Fallback for old 1D spherical data (Wavelength, Theta) -> (Theta, Wavelength)
         phase_interleaved = phase_table.T
 
     data_flat = phase_interleaved.flatten().astype(np.float32)
 
     with open(filename, "wb") as f:
         f.write(b"ATMPHASE")
-        f.write(struct.pack("<I", 2))  # VERSION 2 HEADER
-        f.write(struct.pack("<I", config.num_angles))  # Theta count
-        f.write(struct.pack("<I", config.num_phi_bins))  # Phi count
-        f.write(struct.pack("<I", config.num_wavelengths))  # Wavelength count
-        f.write(struct.pack("<f", float(config.min_wavelength)))
-        f.write(struct.pack("<f", float(config.max_wavelength)))
+        f.write(struct.pack("<I", 2))
+        f.write(struct.pack("<I", config.num_angles))
+        f.write(struct.pack("<I", config.num_phi_bins))
+        f.write(struct.pack("<I", len(wavelengths)))
+        f.write(struct.pack("<f", float(wavelengths[0])))
+        f.write(struct.pack("<f", float(wavelengths[-1])))
         f.write(data_flat.tobytes())
 
     print(f"[GEN] Saved anisotropic v2 binary: {filename}")
-
-    # (Your lobe_analyzer will need an update to handle 3D data,
-    #  you might want to bypass it temporarily if num_phi_bins > 1)

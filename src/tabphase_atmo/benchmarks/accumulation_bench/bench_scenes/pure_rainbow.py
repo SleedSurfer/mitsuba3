@@ -1,5 +1,4 @@
 import mitsuba as mi
-from core.config import MieConfig
 from ..utils import get_asset_path, generate_cloud_grid
 from src.core.wrapper import create_atmospheric_phase
 

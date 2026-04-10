@@ -2,7 +2,7 @@ import drjit as dr
 from drjit.auto import Float, Array3f, Complex2f, PCG32, UInt32
 import numpy as np
 
-from src.core.generator.backends.geometric.models.phasor_ray import PhasorRay
+from ..models.phasor_ray import PhasorRay
 
 
 class PhotonEmitter:
