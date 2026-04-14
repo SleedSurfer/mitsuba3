@@ -50,6 +50,7 @@ class HexagonalComposition(NamedTuple):
     weight: float           # Fractional weight (e.g., 0.6 for 60%)
     length_axis_um: float        # Length of the crystal in micrometers (µm)
     width_axis_um: float        # Width of the crystal in micrometers (µm)
+    variance: float  # Log-normal variance
 
 # ==========================================
 # 2. INTERNAL DTOs
@@ -61,8 +62,8 @@ class BaseParticleConfig:
     num_angles: int = 1800
     material: ParticleMaterial = ParticleMaterial.ICE
     num_wavelengths: int = 16
-    min_wavelength_nm: float = 360.0
-    max_wavelength_nm: float = 830.0
+    min_wavelength_nm: float = 380.0
+    max_wavelength_nm: float = 700
     custom_ior_list: Optional[List[float]] = None
 
     composition: Optional[List[Tuple]] = field(default=None, init=False)
@@ -70,11 +71,8 @@ class BaseParticleConfig:
     computed_iors: List[float] = field(init=False)
 
     def __post_init__(self):
-        self.wavelengths_nm = np.linspace(
-            self.min_wavelength_nm,
-            self.max_wavelength_nm,
-            self.num_wavelengths
-        ).tolist()
+        # Swap out the dumb linspace for our smart picker
+        self.wavelengths_nm = self._calculate_smart_wavelengths()
 
         if self.custom_ior_list is not None:
             self.material = ParticleMaterial.CUSTOM
@@ -83,6 +81,32 @@ class BaseParticleConfig:
             self.computed_iors = self.custom_ior_list
         else:
             self.computed_iors = self._calculate_ior_array()
+
+    def _calculate_smart_wavelengths(self) -> List[float]:
+        """
+        Biases wavelength selection for low-res bakes to ensure core RGB colors
+        are always sampled, preventing 'invisible' UV/IR bounds from stealing samples.
+        """
+        # If we have a healthy amount of samples, uniform spacing is mathematically best for the CDF
+        if self.num_wavelengths >= 12:
+            return np.linspace(self.min_wavelength_nm, self.max_wavelength_nm, self.num_wavelengths).tolist()
+
+        # For "dirty" bakes, we prioritize the core optical anchors.
+        # Order:            Green(Luma), Blue, Red, Deep Violet, Deep Red, Cyan, Yellow, Edge IR, Edge UV
+        priority_anchors = [540.0,      450.0,650.0,   400.0,      700.0, 490.0, 590.0,   770.0,   380.0, 420.0, 620.0]
+
+        # Take the top N requested
+        selected = priority_anchors[:self.num_wavelengths]
+
+        # If they ask for exactly 11 but somehow trigger this branch, fallback gracefully
+        if self.num_wavelengths > len(priority_anchors):
+            return np.linspace(self.min_wavelength_nm, self.max_wavelength_nm, self.num_wavelengths).tolist()
+
+        # Clamp them to the user's defined boundaries just in case they modified min/max
+        clamped = [max(self.min_wavelength_nm, min(w, self.max_wavelength_nm)) for w in selected]
+
+        # Sort them linearly so the renderer processes them sequentially (helps with debugging output)
+        return sorted(clamped)
 
     def _calculate_ior_array(self) -> List[float]:
         iors = []
@@ -125,12 +149,13 @@ class DropletConfig(BaseParticleConfig):
 class HexagonalConfig(BaseParticleConfig):
     # Composition: Tuple[Habit, Weight, C_axis_length_um, A_axis_width_um]
     composition: List[HexagonalComposition] = field(default_factory=list)
+    air_turbulence_factor: float = 1.0
     sun_elevation_deg: float = 0.0
     def __post_init__(self):
         if not self.composition:
             raise ValueError("[Config Error] Empty composition. Give me some crystal habits.")
 
-        total_weight = sum(w for _, w, _, _ in self.composition)
+        total_weight = sum(w for _, w, _, _, _ in self.composition)
         if not math.isclose(total_weight, 1.0, rel_tol=1e-5):
             raise ValueError(f"[Config Error] Weights sum to {total_weight}, not 1.0.")
 
@@ -149,8 +174,8 @@ class Particle:
             backend: BackendType = BackendType.AUTO,
             material: ParticleMaterial = ParticleMaterial.WATER,
             num_wavelengths: int = 16,
-            min_wavelength_nm: float = 360.0,
-            max_wavelength_nm: float = 830.0,
+            min_wavelength_nm: float = 380.0,
+            max_wavelength_nm: float = 700,
             custom_ior_list: Optional[List[float]] = None,
             num_phi_bins: int = 360,
             num_angles: int = 1800
@@ -171,11 +196,12 @@ class Particle:
     def hexagonal(
             composition: List[HexagonalComposition],
             sun_elevation_deg: float = 0.0,
+            air_turbulence_factor: float = 1.0,
             backend: BackendType = BackendType.DRJIT,
             material: ParticleMaterial = ParticleMaterial.ICE,
             num_wavelengths: int = 16,
-            min_wavelength_nm: float = 360.0,
-            max_wavelength_nm: float = 830.0,
+            min_wavelength_nm: float = 380.0,
+            max_wavelength_nm: float = 700,
             custom_ior_list: Optional[List[float]] = None,
             num_phi_bins: int = 360,
             num_angles: int = 1800
@@ -183,6 +209,7 @@ class Particle:
         return HexagonalConfig(
             composition=composition,
             sun_elevation_deg=sun_elevation_deg,
+            air_turbulence_factor=air_turbulence_factor,
             backend=backend,
             material=material,
             num_wavelengths=num_wavelengths,

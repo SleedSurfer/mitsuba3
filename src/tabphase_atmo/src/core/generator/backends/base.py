@@ -22,5 +22,5 @@ ParticleSize = Union[SphereSize, HexSize]
 class ScatteringBackend(Protocol):
     name: str
 
-    def intensity_unpolarized(self, m: complex, wavelength_nm: float, mu: np.ndarray, size: ParticleSize) -> np.ndarray:
+    def intensity_unpolarized(self, m: complex, wavelength_nm: float, theta: np.ndarray, size: ParticleSize) -> np.ndarray:
         ...

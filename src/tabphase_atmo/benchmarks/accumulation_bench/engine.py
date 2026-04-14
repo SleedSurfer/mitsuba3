@@ -15,7 +15,7 @@ def run_render_bench(scene_dict, run_name, config):
     print(f"--- STARTING BENCH: {run_name} ---")
     print(f"Output directory is {OUT_ROOT}/{run_name}")
     run_dir = OUT_ROOT / run_name
-    exr_dir = run_dir / "exr"
+    exr_dir = run_dir
     exr_dir.mkdir(parents=True, exist_ok=True)
 
     print("Loading scene...")

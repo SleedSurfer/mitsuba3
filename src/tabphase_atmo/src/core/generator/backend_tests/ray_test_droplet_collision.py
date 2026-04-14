@@ -1,4 +1,3 @@
-import pytest
 import drjit as dr
 from drjit.auto import Float, Bool, Array3f
 import sys
@@ -7,7 +6,7 @@ import os
 # Ensure the root directory is in the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from geometric.particles.sphere import SphericalParticle
+from particles.spherical.sphere import SphericalParticle
 from geometric.models.phasor_ray import PhasorRay
 
 

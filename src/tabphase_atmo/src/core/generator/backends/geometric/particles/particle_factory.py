@@ -9,7 +9,7 @@ from .base_particle import SphericalParticle, PrismParticle
 from ...base import ParticleSize, SphereSize, HexSize
 
 
-def build_particle(shape_str: str, size: ParticleSize, sun_elevation_deg: float = 0.0):
+def build_particle(shape_str: str, size: ParticleSize, sun_elevation_deg: float = 0.0, air_turbulence_factor: float = 1.0):
     # Smooth Geometries (Unchanged)
     if isinstance(size, SphereSize):
         radius_mm = size.r_um / 1000.0
@@ -26,14 +26,14 @@ def build_particle(shape_str: str, size: ParticleSize, sun_elevation_deg: float 
         c_mm = size.c_axis_um / 1000.0
 
         if shape_str == "tumbling":
-            # Tumbling doesn't care about sun angle (statistically invariant)
             return TumblingHexagon(radius_mm=a_mm, height_mm=c_mm)
 
         elif shape_str == "plate":
             return PlateHexagon(
                 radius_mm=a_mm,
                 height_mm=c_mm,
-                sun_elevation_deg=sun_elevation_deg
+                sun_elevation_deg=sun_elevation_deg,
+                air_turbulence_factor=air_turbulence_factor
             )
 
         elif shape_str == "column_horizontal":
@@ -41,7 +41,8 @@ def build_particle(shape_str: str, size: ParticleSize, sun_elevation_deg: float 
             return HorizontalColumn(
                 radius_mm=a_mm,
                 height_mm=c_mm,
-                sun_elevation_deg=sun_elevation_deg
+                sun_elevation_deg=sun_elevation_deg,
+                air_turbulence_factor=air_turbulence_factor
             )
 
         elif shape_str == "parry":
@@ -49,7 +50,8 @@ def build_particle(shape_str: str, size: ParticleSize, sun_elevation_deg: float 
             return ParryColumn(
                 radius_mm=a_mm,
                 height_mm=c_mm,
-                sun_elevation_deg=sun_elevation_deg
+                sun_elevation_deg=sun_elevation_deg,
+                air_turbulence_factor=air_turbulence_factor
             )
 
         else:

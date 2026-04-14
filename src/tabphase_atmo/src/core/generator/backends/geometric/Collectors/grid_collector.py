@@ -8,22 +8,24 @@ from ..models.ray_patch import RayPatch
 
 
 class CollectionSphere:
-    def __init__(self, mu_bins: np.ndarray, num_phi_bins: int, wavelength_nm: float):
-        self.mu_bins_np = mu_bins
-        self.num_mu_bins = len(mu_bins)
+    def __init__(self, theta_bins: np.ndarray, num_phi_bins: int, wavelength_nm: float):
+        self.theta_bins = theta_bins
+        self.num_theta_bins = len(theta_bins)
         self.num_phi_bins = num_phi_bins
-        self.total_bins = self.num_mu_bins * self.num_phi_bins
+        self.total_bins = self.num_theta_bins * self.num_phi_bins
 
         wavelength_mm = wavelength_nm / 1e6
         self.k = (2.0 * np.pi) / wavelength_mm
+        self.wavelength_nm = wavelength_nm
 
-        theta = np.arccos(mu_bins)
-        dtheta = np.pi / (self.num_mu_bins - 1)
+        # Look how much cleaner this is. No arccos required.
+        dtheta = np.pi / (self.num_theta_bins - 1)
         dphi = (2.0 * np.pi) / self.num_phi_bins
 
-        theta_lo = np.maximum(0, theta - dtheta / 2.0)
-        theta_hi = np.minimum(np.pi, theta + dtheta / 2.0)
+        theta_lo = np.maximum(0, self.theta_bins - dtheta / 2.0)
+        theta_hi = np.minimum(np.pi, self.theta_bins + dtheta / 2.0)
 
+        # Solid angle calculation remains the same, but now it's honest
         self._solid_angles_1d = dphi * (np.cos(theta_lo) - np.cos(theta_hi))
         self._solid_angles_1d = np.maximum(self._solid_angles_1d, 1e-12)
 
@@ -81,7 +83,7 @@ class CollectionSphere:
 
     def _dir_to_continuous_coords(self, d: Array3f) -> Tuple[Float, Float]:
         theta = dr.acos(dr.clip(d.z, Float(-1.0), Float(1.0)))
-        theta_coord = (theta / Float(np.pi)) * Float(self.num_mu_bins - 1)
+        theta_coord = (theta / Float(np.pi)) * Float(self.num_theta_bins - 1)
 
         phi = dr.atan2(Float(d.y), Float(d.x))
         normalized_phi = (phi + Float(np.pi)) / Float(2.0 * np.pi)
@@ -123,29 +125,13 @@ class CollectionSphere:
         d2, bx2, by2, l2, f2, ex2, ey2 = self._gather_ray_data_full(rays, patches.v2)
         d3, bx3, by3, l3, f3, ex3, ey3 = self._gather_ray_data_full(rays, patches.v3)
 
-        # FIX 1: Check total vector energy, not just the X-axis real component!
-        e0_sq = dr.squared_norm(ex0) + dr.squared_norm(ey0)
-        e1_sq = dr.squared_norm(ex1) + dr.squared_norm(ey1)
-        e2_sq = dr.squared_norm(ex2) + dr.squared_norm(ey2)
-        e3_sq = dr.squared_norm(ex3) + dr.squared_norm(ey3)
-        patch_valid = (e0_sq > 1e-12) & (e1_sq > 1e-12) & (e2_sq > 1e-12) & (e3_sq > 1e-12)
+        patch_valid = (dr.abs(ex0.real) > 1e-6) & (dr.abs(ex1.real) > 1e-6) & \
+                      (dr.abs(ex2.real) > 1e-6) & (dr.abs(ex3.real) > 1e-6)
 
+        # Standard geometric focusing, no weird wavelength clamps
         cross1 = dr.cross(d1 - d0, d2 - d0)
         cross2 = dr.cross(d3 - d1, d2 - d1)
-        cross1 = dr.cross(d1 - d0, d2 - d0)
-        cross2 = dr.cross(d3 - d1, d2 - d1)
-
-        # Calculate raw outgoing ray tube area
-        s_i_raw = 0.5 * (dr.norm(cross1) + dr.norm(cross2))
-
-        # THE FIX: Bound the singularity.
-        # Average solid angle of one bin on the sphere = 4*pi / total_bins
-        bin_solid_angle = Float((4.0 * np.pi) / self.total_bins)
-
-        # If the ray is perfectly parallel (s_i_raw ~ 0), clamp it to the size of one bin.
-        # This prevents amplitude scaling from blowing up to 10^16.
-        s_i = dr.maximum(s_i_raw, bin_solid_angle)
-
+        s_i = dr.maximum(0.5 * (dr.norm(cross1) + dr.norm(cross2)), Float(1e-12))
         amp_scale = dr.sqrt(Float(patch_area) / s_i)
 
         E0_x, E0_y, E0_z = self._to_3d_complex(ex0 * amp_scale, ey0 * amp_scale, bx0, by0)
@@ -158,6 +144,7 @@ class CollectionSphere:
         phi2, th2 = self._dir_to_continuous_coords(d2)
         phi3, th3 = self._dir_to_continuous_coords(d3)
 
+        # Azimuthal Wrapping Safety
         half_phi = Float(self.num_phi_bins / 2.0)
         max_phi_val = Float(self.num_phi_bins)
         phi1 = dr.select(phi1 - phi0 > half_phi, phi1 - max_phi_val,
@@ -176,30 +163,18 @@ class CollectionSphere:
         h = dr.maximum(max_th - min_th + Float(1.0), Float(1.0))
         max_idx = UInt32(dr.minimum(w * h, Float(256)))
 
+        # Precompute Determinants
         v0x_t1, v0y_t1 = phi1 - phi0, th1 - th0
         v1x_t1, v1y_t1 = phi2 - phi0, th2 - th0
-        d00_t1 = v0x_t1 * v0x_t1 + v0y_t1 * v0y_t1
-        d01_t1 = v0x_t1 * v1x_t1 + v0y_t1 * v1y_t1
-        d11_t1 = v1x_t1 * v1x_t1 + v1y_t1 * v1y_t1
+        d00_t1, d01_t1, d11_t1 = v0x_t1 ** 2 + v0y_t1 ** 2, v0x_t1 * v1x_t1 + v0y_t1 * v1y_t1, v1x_t1 ** 2 + v1y_t1 ** 2
         denom_t1 = d00_t1 * d11_t1 - d01_t1 * d01_t1
+        inv_denom_t1 = Float(1.0) / dr.select(dr.abs(denom_t1) > 1e-8, denom_t1, Float(1e-8))
 
         v0x_t2, v0y_t2 = phi2 - phi3, th2 - th3
         v1x_t2, v1y_t2 = phi1 - phi3, th1 - th3
-        d00_t2 = v0x_t2 * v0x_t2 + v0y_t2 * v0y_t2
-        d01_t2 = v0x_t2 * v1x_t2 + v0y_t2 * v1y_t2
-        d11_t2 = v1x_t2 * v1x_t2 + v1y_t2 * v1y_t2
+        d00_t2, d01_t2, d11_t2 = v0x_t2 ** 2 + v0y_t2 ** 2, v0x_t2 * v1x_t2 + v0y_t2 * v1y_t2, v1x_t2 ** 2 + v1y_t2 ** 2
         denom_t2 = d00_t2 * d11_t2 - d01_t2 * d01_t2
-
-        # FIX 2: Precompute degenerate flags to trigger point-splatting fallback
-        is_deg_t1 = dr.abs(denom_t1) <= 1e-8
-        is_deg_t2 = dr.abs(denom_t2) <= 1e-8
-        inv_denom_t1 = dr.select(is_deg_t1, Float(1.0), Float(1.0) / denom_t1)
-        inv_denom_t2 = dr.select(is_deg_t2, Float(1.0), Float(1.0) / denom_t2)
-
-        target_center_phi_t1 = dr.round(phi0)
-        target_center_th_t1 = dr.round(th0)
-        target_center_phi_t2 = dr.round(phi3)
-        target_center_th_t2 = dr.round(th3)
+        inv_denom_t2 = Float(1.0) / dr.select(dr.abs(denom_t2) > 1e-8, denom_t2, Float(1e-8))
 
         idx = dr.zeros(UInt32, dr.width(min_phi))
         dx = dr.zeros(Float, dr.width(min_phi))
@@ -210,35 +185,26 @@ class CollectionSphere:
             target_th = min_th + dy
             active = (target_phi <= max_phi) & (target_th <= max_th) & patch_valid
 
-            # T1 Processing
+            # Ruthless Barycentric T1
             v2x_t1, v2y_t1 = target_phi - phi0, target_th - th0
-            d20_t1 = v2x_t1 * v0x_t1 + v2y_t1 * v0y_t1
-            d21_t1 = v2x_t1 * v1x_t1 + v2y_t1 * v1y_t1
+            d20_t1, d21_t1 = v2x_t1 * v0x_t1 + v2y_t1 * v0y_t1, v2x_t1 * v1x_t1 + v2y_t1 * v1y_t1
+            v1 = (d11_t1 * d20_t1 - d01_t1 * d21_t1) * inv_denom_t1
+            w1_b = (d00_t1 * d21_t1 - d01_t1 * d20_t1) * inv_denom_t1
+            u1 = Float(1.0) - v1 - w1_b
+            in_t1 = (u1 >= 0.0) & (u1 <= 1.0) & (v1 >= 0.0) & (v1 <= 1.0) & (w1_b >= 0.0) & (w1_b <= 1.0) & (
+                        dr.abs(denom_t1) > 1e-8)
 
-            v1 = dr.select(is_deg_t1, Float(0.0), (d11_t1 * d20_t1 - d01_t1 * d21_t1) * inv_denom_t1)
-            w1_b = dr.select(is_deg_t1, Float(0.0), (d00_t1 * d21_t1 - d01_t1 * d20_t1) * inv_denom_t1)
-            u1 = dr.select(is_deg_t1, Float(1.0), Float(1.0) - v1 - w1_b)
-
-            in_t1_geom = (u1 >= 0.0) & (u1 <= 1.0) & (v1 >= 0.0) & (v1 <= 1.0) & (w1_b >= 0.0) & (w1_b <= 1.0)
-            in_t1 = dr.select(is_deg_t1, (target_phi == target_center_phi_t1) & (target_th == target_center_th_t1),
-                              in_t1_geom)
-
-            # T2 Processing
             v2x_t2, v2y_t2 = target_phi - phi3, target_th - th3
-            d20_t2 = v2x_t2 * v0x_t2 + v2y_t2 * v0y_t2
-            d21_t2 = v2x_t2 * v1x_t2 + v2y_t2 * v1y_t2
-
-            v2 = dr.select(is_deg_t2, Float(0.0), (d11_t2 * d20_t2 - d01_t2 * d21_t2) * inv_denom_t2)
-            w2_b = dr.select(is_deg_t2, Float(0.0), (d00_t2 * d21_t2 - d01_t2 * d20_t2) * inv_denom_t2)
-            u2 = dr.select(is_deg_t2, Float(1.0), Float(1.0) - v2 - w2_b)
-
-            in_t2_geom = (u2 >= 0.0) & (u2 <= 1.0) & (v2 >= 0.0) & (v2 <= 1.0) & (w2_b >= 0.0) & (w2_b <= 1.0)
-            in_t2 = dr.select(is_deg_t2, (target_phi == target_center_phi_t2) & (target_th == target_center_th_t2),
-                              in_t2_geom)
+            d20_t2, d21_t2 = v2x_t2 * v0x_t2 + v2y_t2 * v0y_t2, v2x_t2 * v1x_t2 + v2y_t2 * v1y_t2
+            v2 = (d11_t2 * d20_t2 - d01_t2 * d21_t2) * inv_denom_t2
+            w2_b = (d00_t2 * d21_t2 - d01_t2 * d20_t2) * inv_denom_t2
+            u2 = Float(1.0) - v2 - w2_b
+            in_t2 = (u2 >= 0.0) & (u2 <= 1.0) & (v2 >= 0.0) & (v2 <= 1.0) & (w2_b >= 0.0) & (w2_b <= 1.0) & (
+                        dr.abs(denom_t2) > 1e-8)
 
             phi_idx = UInt32(target_phi + max_phi_val) % self.num_phi_bins
-            th_idx = UInt32(dr.clip(target_th, 0.0, self.num_mu_bins - 1))
-            flat_idx = phi_idx * self.num_mu_bins + th_idx
+            th_idx = UInt32(dr.clip(target_th, 0.0, self.num_theta_bins - 1))
+            flat_idx = phi_idx * self.num_theta_bins + th_idx
 
             l1_val = l0 * u1 + l1 * v1 + l2 * w1_b
             ex1_x, ex1_y, ex1_z = E0_x * u1 + E1_x * v1 + E2_x * w1_b, E0_y * u1 + E1_y * v1 + E2_y * w1_b, E0_z * u1 + E1_z * v1 + E2_z * w1_b
@@ -268,22 +234,15 @@ class CollectionSphere:
             idx += 1
 
     def finalize(self) -> np.ndarray:
-        # Solid angle normalization
-        omega_1d = np.tile(self._solid_angles_1d, self.num_phi_bins)
-
-        # Unpolarized light approximation tracks independent X, Y, Z complex fields
         intensity = (self._bins_ex_real ** 2 + self._bins_ex_imag ** 2 +
                      self._bins_ey_real ** 2 + self._bins_ey_imag ** 2 +
                      self._bins_ez_real ** 2 + self._bins_ez_imag ** 2)
 
-        # Reshape to (Phi, Theta)
-        intensity_2d = np.array(intensity).reshape((self.num_phi_bins, self.num_mu_bins))
+        density_2d = np.array(intensity).reshape((self.num_phi_bins, self.num_theta_bins))
 
         self.reset()
 
-        # If the user only asked for 1 phi bin (spherical drop), we can average it down
-        # to save memory. Otherwise, hand back the full 2D anisotropic map.
         if self.num_phi_bins == 1:
-            return np.mean(intensity_2d, axis=0)
+            return np.mean(density_2d, axis=0)
 
-        return intensity_2d
+        return density_2d

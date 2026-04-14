@@ -28,13 +28,13 @@ def get_scene(config, phase):
     # --- 4. Z-UP PHASE FUNCTION ---
     # We MUST tell your phase function generator that gravity is now on the Z-axis,
     # otherwise your plates will be oriented sideways relative to the sky dome.
-    phase_dict = create_atmospheric_phase(phase, up_vector=(0.0, 0.0, 1.0), force_regen=True)
+    phase_dict = create_atmospheric_phase(phase, up_vector=(0.0, 0.0, 1.0), force_regen=False)
 
     return {
         "type": "scene",
         "integrator": {
             "type": "volpath",
-            "max_depth": 3,  # Bumped from 2 to 3 for juicier multi-scattering
+            "max_depth": 2,
         },
         "sensor": {
             "type": "perspective",

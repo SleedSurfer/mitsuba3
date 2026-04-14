@@ -26,7 +26,7 @@ def test_master_bounce_loop():
     mu = np.linspace(1, -1, 10)  # 10 dummy angles
 
     # 2. Fire the engine
-    _ = backend.intensity_unpolarized(m, x, mu)
+    _ = backend.intensity_unpolarized(m, x, mu,,
 
     # 3. Interrogate the results
     wavefronts = backend._last_wavefronts
@@ -81,7 +81,7 @@ def test_phase_coherence():
     x = 500.0  # x = 2pi*r/lambda
 
     # Run the simulation to get wavefronts
-    _ = backend.intensity_unpolarized(m, x, np.linspace(1, -1, 10))
+    _ = backend.intensity_unpolarized(m, x, np.linspace(1, -1, 10),,
     wavefronts = backend._last_wavefronts
 
     # Let's look at the p=1 wavefront (Direct Transmission)

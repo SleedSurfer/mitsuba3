@@ -6,18 +6,17 @@ from .hexagonal_base import HexagonalParticle
 
 
 class HorizontalColumn(HexagonalParticle):
-    def __init__(self, radius_mm: float, height_mm: float, flutter_deg: float = 1.0, sun_elevation_deg: float = 0.0):
+    def __init__(self, radius_mm: float, height_mm: float, flutter_deg: float = 1.0, sun_elevation_deg: float = 0.0,
+                 air_turbulence_factor: float = 1.0):
         super().__init__(radius_mm, height_mm)
-        self.flutter_rad = flutter_deg * np.pi / 180.0
+        self.flutter_rad = (flutter_deg * air_turbulence_factor) * np.pi / 180.0
         self.sun_elevation_deg = sun_elevation_deg
 
     def randomize_orientations(self, num_rays: int, rng):
-        # 1. Start with C-axis in horizontal XZ plane
         azimuth = rng.next_float32() * 2.0 * np.pi
         n0_x = dr.cos(azimuth)
         n0_z = dr.sin(azimuth)
 
-        # 2. Apply Aerodynamic Flutter (Vertical Wobble)
         u1 = dr.maximum(rng.next_float32(), 1e-6)
         tilt = self.flutter_rad * dr.sqrt(-2.0 * dr.log(u1))
         n0_y = dr.sin(tilt)

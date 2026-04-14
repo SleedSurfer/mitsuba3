@@ -5,14 +5,14 @@ import scipy.ndimage as ndimage
 
 
 class PhotonCollectionSphere:
-    def __init__(self, mu_bins: np.ndarray, num_phi_bins: int):
-        self.num_mu_bins = len(mu_bins)
+    def __init__(self, theta_bins: np.ndarray, num_phi_bins: int):
+        self.num_theta_bins = len(theta_bins)
         self.num_phi_bins = num_phi_bins
-        self.total_bins = self.num_mu_bins * self.num_phi_bins
+        self.total_bins = self.num_theta_bins * self.num_phi_bins
 
         # Solid angle of each bin (used to normalize intensity at the end)
-        theta = np.arccos(mu_bins)
-        dtheta = np.pi / (self.num_mu_bins - 1)
+        theta = theta_bins
+        dtheta = np.pi / (self.num_theta_bins - 1)
         dphi = (2.0 * np.pi) / self.num_phi_bins
 
         theta_lo = np.maximum(0, theta - dtheta / 2.0)
@@ -34,14 +34,14 @@ class PhotonCollectionSphere:
         phi = dr.atan2(dy, dx)
 
         # 3. Map to array indices (Using floor to prevent rounding artifacts)
-        theta_coord = (theta / Float(np.pi)) * Float(self.num_mu_bins - 1)
+        theta_coord = (theta / Float(np.pi)) * Float(self.num_theta_bins - 1)
         normalized_phi = (phi + Float(np.pi)) / Float(2.0 * np.pi)
         phi_coord = normalized_phi * Float(self.num_phi_bins)
 
-        th_idx = dr.clip(UInt32(dr.floor(theta_coord)), 0, self.num_mu_bins - 1)
+        th_idx = dr.clip(UInt32(dr.floor(theta_coord)), 0, self.num_theta_bins - 1)
         phi_idx = UInt32(dr.floor(phi_coord)) % self.num_phi_bins
 
-        flat_idx = phi_idx * self.num_mu_bins + th_idx
+        flat_idx = phi_idx * self.num_theta_bins + th_idx
 
         # 4. Calculate pure energy (magnitude squared of the E field)
         energy = dr.squared_norm(rays.Ex) + dr.squared_norm(rays.Ey)
@@ -51,7 +51,8 @@ class PhotonCollectionSphere:
 
     def finalize(self) -> np.ndarray:
         intensity_1d = np.array(self.bins_intensity)
-        intensity_2d = intensity_1d.reshape((self.num_phi_bins, self.num_mu_bins))
+        # Use the new naming
+        intensity_2d = intensity_1d.reshape((self.num_phi_bins, self.num_theta_bins))
 
         # 1. Convert to Density FIRST
         omega_2d = np.tile(self._solid_angles_1d, (self.num_phi_bins, 1))
@@ -59,15 +60,15 @@ class PhotonCollectionSphere:
 
         # 2. Blur the density (kills noise without creating black holes)
         target_blur_deg = 0.0
-        deg_per_mu_bin = 180.0 / float(max(1, self.num_mu_bins - 1))
+        deg_per_theta_bin = 180.0 / float(max(1, self.num_theta_bins - 1))
         deg_per_phi_bin = 360.0 / float(max(1, self.num_phi_bins))
 
-        sigma_mu = max(1.0, target_blur_deg / deg_per_mu_bin)
+        sigma_theta = max(1.0, target_blur_deg / deg_per_theta_bin)
         sigma_phi = max(1.0, target_blur_deg / deg_per_phi_bin)
 
         density_2d = ndimage.gaussian_filter(
             density_raw,
-            sigma=(sigma_phi, sigma_mu),
+            sigma=(sigma_phi, sigma_theta),
             mode=['wrap', 'nearest']
         )
 

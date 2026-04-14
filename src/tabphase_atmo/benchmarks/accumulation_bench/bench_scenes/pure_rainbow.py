@@ -7,7 +7,7 @@ def get_scene(config,phase):
 
     light_mod = 0.5
     # --- PHASE FUNCTION ---
-    phase_dict = create_atmospheric_phase(phase,up_vector=(0.0, 1.0, 0.0),force_regen=True)
+    phase_dict = create_atmospheric_phase(phase,up_vector=(0.0, 1.0, 0.0),force_regen=False)
 
     sun_direction = [0, 0, -1]
 
@@ -38,7 +38,16 @@ def get_scene(config,phase):
         "sun": {
             "type": "directional",
             "direction": sun_direction,
-            "irradiance": {"type": "rgb", "value": 50.0*light_mod},
+            "irradiance": {"type": "rgb", "value": [50.0,50.0,50.0]},
+            # "irradiance": {
+            #     "type": "spectrum",
+            #     "value": [
+            #         (380.0, 1.00),
+            #         (400.0, 1.00),  # violet
+            #         (430.0, 1.0),
+            #         (450.0, 1.0),
+            #     ],
+            # },
         },
 
         "cloud_slab": {

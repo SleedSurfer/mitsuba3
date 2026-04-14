@@ -1,5 +1,8 @@
 import os
+import numpy as np
 
+from filters import apply_polydispersity_filter
+from utils.wrapper_math import compute_optical_weight, normalize_macroscopic_phase
 from .generator.backends import (
     MiePythonBackend,
     MieReferenceBackend,
@@ -11,60 +14,77 @@ from .generator.visualize import visualize_anisotropic
 
 from .config import BaseParticleConfig, DropletConfig, HexagonalConfig, BackendType
 
+NUM_BATCHES=5
+GRID_RESOLUTION=600
 
 def _ensure_dir(path: str) -> None:
     if path and not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
 
 
-def _generate_cache_filename(config: BaseParticleConfig) -> str:
-    mid_ior = config.computed_iors[len(config.computed_iors) // 2] if config.computed_iors else 1.31
-    ior_str = f"ior{mid_ior:.3f}"
+def _get_base_lut_info(config: BaseParticleConfig) -> str:
+    base = f"{config.num_angles}ang-{config.num_phi_bins}az-{config.num_wavelengths}wl"
+    if isinstance(config, HexagonalConfig):
+        base += f"-{int(config.sun_elevation_deg)}sun"
+        base += f"-{int(config.air_turbulence_factor*100)}turb"
+    return base
 
+
+def _generate_raw_filename(config: BaseParticleConfig, comp_item) -> str:
+    lut_info = _get_base_lut_info(config)
     if isinstance(config, DropletConfig):
-        comp_strs = [f"{shape.value[:4]}{weight:.2f}_r{r}v{v}" for shape, weight, r, v in config.composition]
-        comp_joined = "_".join(comp_strs)
-        return f"droplet_{comp_joined}_{ior_str}"
-
-    elif isinstance(config, HexagonalConfig):
-        comp_strs = [f"{habit.value[:4]}{weight:.2f}_c{c}a{a}" for habit, weight, c, a in config.composition]
-        comp_joined = "_".join(comp_strs)
-        return f"hex_{comp_joined}_{ior_str}"
+        shape, _, r, _ = comp_item
+        return f"droplet_{lut_info}_{shape.value[:4]}{int(r)}um_raw"
     else:
-        raise ValueError("Unknown config class passed to cache generator.")
+        habit, _, c, a, _ = comp_item
+        return f"hex_{lut_info}_{habit.value[:4]}{int(c)}c{int(a)}a_raw"
+
+
+def _generate_mix_filename(config: BaseParticleConfig) -> str:
+    lut_info = _get_base_lut_info(config)
+    if isinstance(config, DropletConfig):
+        comp_strs = [f"{shape.value[:4]}{int(r)}um-{int(w * 100)}w-{int(v * 1000)}pvar"
+                     for shape, w, r, v in config.composition]
+    else:
+        comp_strs = [f"{habit.value[:4]}{int(c)}c{int(a)}a-{int(w * 100)}w-{int(v * 1000)}pvar"
+                     for habit, w, c, a, v in config.composition]
+
+    return f"{'droplet' if isinstance(config, DropletConfig) else 'hex'}_{lut_info}_" + "_".join(comp_strs)
 
 
 def _get_paths(config: BaseParticleConfig, cache_dir: str = "cache"):
+    # Unified path generation so the wrapper stays clean
     root = os.path.join(cache_dir, config.backend.name.lower())
     _ensure_dir(root)
-    filename = _generate_cache_filename(config)
-    bin_path = os.path.join(root, f"{filename}.bin")
 
-    heat_dir = os.path.join(root, "heatmaps")
-    _ensure_dir(heat_dir)
-    heat_path = os.path.join(heat_dir, f"{filename}.png")
+    raw_dir = os.path.join(root, "raw_habits")
+    _ensure_dir(raw_dir)
+
+    final_filename = _generate_mix_filename(config)
+    bin_path = os.path.join(root, f"{final_filename}.bin")
 
     polar_dir = os.path.join(root, "polars")
     _ensure_dir(polar_dir)
-    polar_path = os.path.join(polar_dir, f"{filename}.png")
-    return bin_path, heat_path, polar_path
+    polar_path = os.path.join(polar_dir, f"{final_filename}.png")
+
+    return raw_dir, bin_path, polar_path
 
 
 def _resolve_backend(config: BaseParticleConfig, specific_habit: str = "sphere"):
-    # Extract the sun elevation if it exists (defaults to 0.0 for droplets/spheres)
     sun_elev = getattr(config, 'sun_elevation_deg', 0.0)
+    turbulence = getattr(config, 'air_turbulence_factor', 1.0)
 
     if config.backend == BackendType.AUTO:
         return HybridBackend(
             MiePythonBackend(),
-            DrJitRaytracerBackend(grid_res=600, num_batches=4, num_phi_bins=config.num_phi_bins,
+            DrJitRaytracerBackend(grid_res=GRID_RESOLUTION, num_batches=NUM_BATCHES, num_phi_bins=config.num_phi_bins,
                                   particle_shape=specific_habit, sun_elevation_deg=sun_elev),
             x0=800.0, x1=1400.0
         )
     if config.backend == BackendType.DRJIT:
         return DrJitRaytracerBackend(
-            grid_res=500, num_batches=20, num_phi_bins=config.num_phi_bins,
-            particle_shape=specific_habit, sun_elevation_deg=sun_elev
+            grid_res=GRID_RESOLUTION, num_batches=NUM_BATCHES, num_phi_bins=config.num_phi_bins,
+            particle_shape=specific_habit, sun_elevation_deg=sun_elev, air_turbulence_factor=turbulence
         )
     if config.backend == BackendType.MIEPYTHON:
         return MiePythonBackend()
@@ -73,57 +93,82 @@ def _resolve_backend(config: BaseParticleConfig, specific_habit: str = "sphere")
     raise ValueError(f"Unknown backend enum '{config.backend}'.")
 
 
-def create_atmospheric_phase(config: BaseParticleConfig, up_vector: tuple = (0.0, 1.0, 0.0),
-                             force_regen=False, generate_heatmap=True, generate_polar=True, cache_dir="cache"):
-    file_path, heatmap_path, polar_path = _get_paths(config, cache_dir)
+def _resolve_raw_habit(config: BaseParticleConfig, comp_item, raw_dir: str, force_regen: bool):
+    """Fetches raw energy arrays from cache, or generates them if missing."""
+    raw_filename = _generate_raw_filename(config, comp_item) + ".npz"
+    raw_path = os.path.join(raw_dir, raw_filename)
 
-    if not force_regen and os.path.exists(file_path):
-        print(f"[Wrapper] Cache Hit: {file_path}. We take those.")
+    if not force_regen and os.path.exists(raw_path):
+        print(f"          -> [Raw Cache Hit] Loading {raw_filename}...")
+        loaded = np.load(raw_path)
+        return loaded['phase'], loaded['mu'], loaded['wl']
+
+    print(f"          -> [SkySim] Cooking raw physical energy: {raw_filename}...")
+
+    if isinstance(config, DropletConfig):
+        shape_str = comp_item[0].value
+        habit_params = {"radius": comp_item[2], "variance": comp_item[3]}
+    else:
+        shape_str = comp_item[0].value
+        habit_params = {
+            "c_axis": comp_item[2], "a_axis": comp_item[3],
+            "variance": comp_item[4], "sun_elevation_deg": config.sun_elevation_deg
+        }
+
+    be = _resolve_backend(config, specific_habit=shape_str)
+    shape_table, shape_mu, shape_wl = generate_phase_table(config, backend=be, habit_params=habit_params)
+
+    np.savez_compressed(raw_path, phase=shape_table, mu=shape_mu, wl=shape_wl)
+    return shape_table, shape_mu, shape_wl
+
+
+def create_atmospheric_phase(config: BaseParticleConfig, up_vector: tuple = (0.0, 0.0, 1.0),
+                             force_regen=False, generate_polar=True, cache_dir="cache"):
+    raw_dir, bin_path, polar_path = _get_paths(config, cache_dir)
+
+    # 1. Final Output Cache Check
+    if not force_regen and os.path.exists(bin_path):
+        print(f"[Wrapper] Final Mix Cache Hit: {os.path.basename(bin_path)}")
         if generate_polar and not os.path.exists(polar_path):
-            try:
-                visualize_anisotropic(file_path, polar_path)
-            except Exception as e:
-                print(f"[Wrapper] Polar plot regen failed: {e}")
-        return {"type": "atmosphericphase", "filename": file_path, "up": up_vector}
+            visualize_anisotropic(bin_path, polar_path)
+        return {"type": "atmosphericphase", "filename": bin_path, "up": up_vector}
 
-    print(f"[Wrapper] Generating new LUT: {os.path.basename(file_path)}...")
+    print(f"[Wrapper] Assembling new Mix: {os.path.basename(bin_path)}...")
+    master_phase_table, master_mu, master_wl = None, None, None
 
-    try:
-        phase_table = None
-        mu = None
-        wavelengths = None
+    # 2. Accumulate Habits
+    for comp_item in config.composition:
+        variance = comp_item[3] if isinstance(config, DropletConfig) else comp_item[4]
+        optical_weight = compute_optical_weight(config, comp_item)
 
-        for comp_item in config.composition:
-            if isinstance(config, DropletConfig):
-                shape_enum, weight, radius, variance = comp_item
-                shape_str = shape_enum.value
-                habit_params = {"radius": radius, "variance": variance}
-            else:
-                shape_enum, weight, c_axis, a_axis = comp_item
-                shape_str = shape_enum.value
-                habit_params = {"c_axis": c_axis, "a_axis": a_axis, "sun_elevation_deg": config.sun_elevation_deg}
+        # Fetch raw energy
+        shape_table, shape_mu, shape_wl = _resolve_raw_habit(config, comp_item, raw_dir, force_regen)
 
-            print(f"          -> Cooking shape: {shape_str} (Weight: {weight * 100:.1f}%) | Params: {habit_params}")
+        # Apply blur if needed
+        if variance >= 0.001:
+            print(f"          -> Applying polydispersity sim (variance={variance:.2f})...")
+            shape_table = apply_polydispersity_filter(shape_table, config.num_angles, variance)
 
-            be = _resolve_backend(config, specific_habit=shape_str)
-            shape_table, shape_mu, shape_wl = generate_phase_table(config, backend=be, habit_params=habit_params)
+        # Mix into master
+        print(f"          -> Blending habit with Optical Weight: {optical_weight:.4f}")
+        if master_phase_table is None:
+            master_phase_table = shape_table * optical_weight
+            master_mu = shape_mu
+            master_wl = shape_wl
+        else:
+            master_phase_table += shape_table * optical_weight
 
-            if phase_table is None:
-                phase_table = shape_table * weight
-                mu = shape_mu
-                wavelengths = shape_wl
-            else:
-                phase_table += shape_table * weight
+    # 3. Finalize and Save
+    print(f"[Wrapper] Normalizing final macroscopic phase volume...")
+    master_phase_table = normalize_macroscopic_phase(master_phase_table, master_mu, config.num_phi_bins)
 
-        save_binary_file(file_path, phase_table, mu, wavelengths, config)
+    print(f"[Wrapper] Saving Master Mix...")
+    save_binary_file(bin_path, master_phase_table, master_mu, master_wl, config)
 
-        if generate_polar:
-            visualize_anisotropic(file_path, polar_path)
+    if generate_polar:
+        try:
+            visualize_anisotropic(bin_path, polar_path)
+        except Exception as e:
+            print(f"[Wrapper] Polar plot generation failed: {e}")
 
-    except Exception as e:
-        print(f"[Wrapper] GENERATION FAILED: {e}")
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        raise e
-
-    return {"type": "atmosphericphase", "filename": file_path, "up": up_vector}
+    return {"type": "atmosphericphase", "filename": bin_path, "up": up_vector}

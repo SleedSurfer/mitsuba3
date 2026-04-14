@@ -1,6 +1,6 @@
 import numpy as np
 import drjit as dr
-from drjit.auto import Float, Complex2f
+from drjit.auto import Float, Complex2f, Array3f
 import copy
 from ..tracer_core import trace_bounce
 from ..optics import apply_basis_rotation
@@ -8,46 +8,34 @@ from ..emitters.grid_emitter import GridEmitter
 from ..postprocess import apply_diffraction_smoothing
 
 
-def calculate_focal_crossings(exiting_wavefronts, logical_x, logical_y):
+
+def _trace_phasor_batch(active_rays, patches, particle, ior_real_dr, ior_inv_dr):
     """
-    The Caustic Engine. Takes the raw exiting wavefronts and calculates the
-    Jacobian determinants across the ray quads to detect focal line crossings
-    (Gouy phase shifts).
+    Executes a single batch of phasor tracking with full AutoDiff integration.
     """
-    final_wavefronts = []
+    # ==========================================
+    # 1. THE AD INJECTION
+    # ==========================================
+    # We must explicitly link the rays' physical origin to the AD graph.
+    x_init = active_rays.origin.x
+    y_init = active_rays.origin.y
 
-    for rays, patch, bounce_num, theta_out in exiting_wavefronts:
-        # Fetch logical starting coordinates for the patch triangle (v0, v1, v2)
-        u_0 = dr.gather(Float, logical_x, patch.v0)
-        v_0 = dr.gather(Float, logical_y, patch.v0)
+    phi = dr.atan2(y_init, x_init)
+    b_impact = x_init ** 2 + y_init ** 2
 
-        # Fetch exiting angles for the patch
-        t_0 = dr.gather(Float, theta_out, patch.v0)
-        t_1 = dr.gather(Float, theta_out, patch.v1)
-        t_2 = dr.gather(Float, theta_out, patch.v2)
+    # Arm the gradient tracker on our independent variable
+    dr.enable_grad(b_impact)
 
-        # Numerical derivatives across the wavefront quad
-        dt_du = t_1 - t_0
-        dt_dv = t_2 - t_0
+    # Reconstruct the origin using the tracked variable so the math is connected
+    r_new = dr.sqrt(dr.maximum(b_impact, Float(0.0)))
+    active_rays.origin = Array3f(
+        r_new * dr.cos(phi),
+        r_new * dr.sin(phi),
+        active_rays.origin.z
+    )
 
-        # The sign of the derivative tells us if the wavefront has folded in on itself
-        derivative_sign = (dt_du * u_0) + (dt_dv * v_0)
-        caustic_addition = dr.select(derivative_sign > 0.0, 1, 0)
-
-        # Base focal crossings depend on the internal bounce number
-        base_focal = max(0, bounce_num - 1)
-        rays.focal_lines_crossed = type(rays.focal_lines_crossed)(base_focal + caustic_addition)
-
-        final_wavefronts.append((rays, patch))
-
-    return final_wavefronts
-
-
-def _trace_phasor_batch(active_rays, patches, logical_x, logical_y, particle, ior_real_dr, ior_inv_dr):
-    """
-    Executes a single batch of phasor tracking. Clean, modular, no boilerplate.
-    """
     exiting_wavefronts = []
+    thetas_to_eval = []
 
     # ==========================================
     # BOUNCE 0 (Entering the Particle)
@@ -56,12 +44,11 @@ def _trace_phasor_batch(active_rays, patches, logical_x, logical_y, particle, io
         active_rays, particle, ior_real_dr
     )
 
-    # Initialize path length and zero out missed rays
     active_rays.Ex *= dr.select(hit_mask, Complex2f(1.0, 0.0), Complex2f(0.0, 0.0))
     active_rays.Ey *= dr.select(hit_mask, Complex2f(1.0, 0.0), Complex2f(0.0, 0.0))
     active_rays.opt_path_length += safe_t * 1.0
 
-    # 1. Handle external reflection (Branch A)
+    # Branch A: External Reflection (p=0)
     E_x_refl, E_y_refl, b_x_refl, b_y_refl = apply_basis_rotation(
         active_rays.Ex, active_rays.Ey, active_rays.basis_x, active_rays.basis_y,
         active_rays.direction, normals, d_refl, r_perp, r_para
@@ -72,12 +59,15 @@ def _trace_phasor_batch(active_rays, patches, logical_x, logical_y, particle, io
     p0_rays.direction = dr.select(hit_mask, d_refl, active_rays.direction)
     p0_rays.Ex, p0_rays.Ey = E_x_refl, E_y_refl
     p0_rays.basis_x, p0_rays.basis_y = b_x_refl, b_y_refl
-
     p0_rays.opt_path_length = active_rays.opt_path_length - dr.dot(p0_rays.origin, p0_rays.direction)
+
     theta_out_0 = dr.acos(dr.clip(p0_rays.direction.z, Float(-1.0), Float(1.0)))
+
+    # Store the angle array so the AD graph knows what outputs to evaluate
+    thetas_to_eval.append(theta_out_0)
     exiting_wavefronts.append((p0_rays, patches, 0, theta_out_0))
 
-    # 2. Handle refraction inward (Branch B - Updates active_rays for next loops)
+    # Branch B: Refraction Inward
     E_x_refr, E_y_refr, b_x_refr, b_y_refr = apply_basis_rotation(
         active_rays.Ex, active_rays.Ey, active_rays.basis_x, active_rays.basis_y,
         active_rays.direction, normals, d_refr, t_perp, t_para
@@ -97,7 +87,7 @@ def _trace_phasor_batch(active_rays, patches, logical_x, logical_y, particle, io
 
         active_rays.opt_path_length += safe_t * ior_real_dr
 
-        # 1. Handle refraction outward (Exit)
+        # Branch A: Refract Outward (Exit)
         E_x_exit, E_y_exit, b_x_exit, b_y_exit = apply_basis_rotation(
             active_rays.Ex, active_rays.Ey, active_rays.basis_x, active_rays.basis_y,
             active_rays.direction, normals, d_refr, t_perp, t_para
@@ -111,12 +101,14 @@ def _trace_phasor_batch(active_rays, patches, logical_x, logical_y, particle, io
         p_exit_rays.Ex = dr.select(valid_transmission, E_x_exit, Complex2f(0.0, 0.0))
         p_exit_rays.Ey = dr.select(valid_transmission, E_y_exit, Complex2f(0.0, 0.0))
         p_exit_rays.basis_x, p_exit_rays.basis_y = b_x_exit, b_y_exit
-
         p_exit_rays.opt_path_length = active_rays.opt_path_length - dr.dot(p_exit_rays.origin, p_exit_rays.direction)
+
         theta_out_p = dr.acos(dr.clip(p_exit_rays.direction.z, Float(-1.0), Float(1.0)))
+
+        thetas_to_eval.append(theta_out_p)
         exiting_wavefronts.append((p_exit_rays, patches, p, theta_out_p))
 
-        # 2. Handle internal reflection (Updates active_rays)
+        # Branch B: Reflect Inward
         E_x_int, E_y_int, b_x_int, b_y_int = apply_basis_rotation(
             active_rays.Ex, active_rays.Ey, active_rays.basis_x, active_rays.basis_y,
             active_rays.direction, normals, d_refl, r_perp, r_para
@@ -126,8 +118,31 @@ def _trace_phasor_batch(active_rays, patches, logical_x, logical_y, particle, io
         active_rays.Ex, active_rays.Ey = E_x_int, E_y_int
         active_rays.basis_x, active_rays.basis_y = b_x_int, b_y_int
 
-    # Process all exiting rays through the caustic engine
-    return calculate_focal_crossings(exiting_wavefronts, logical_x, logical_y)
+    # ==========================================
+    # 2. THE CAUSTIC ENGINE (AutoDiff Execution)
+    # ==========================================
+    # Seed the gradient (db/db = 1)
+    dr.set_grad(b_impact, 1.0)
+
+    # Push the derivative forward through the entire accumulated graph
+    dr.forward_to(*thetas_to_eval, flags=dr.ADFlag.Default | dr.ADFlag.AllowNoGrad)
+
+    final_wavefronts = []
+
+    for rays, patch, p, theta_out in exiting_wavefronts:
+        # Harvest the exact, per-vertex analytical derivative
+        dtheta_db = dr.grad(theta_out)
+
+        base_focal = max(0, p - 1)
+        caustic_addition = dr.select(dtheta_db > 0.0, 1, 0)
+
+        rays.focal_lines_crossed = type(rays.focal_lines_crossed)(base_focal + caustic_addition)
+        final_wavefronts.append((rays, patch))
+
+    # Clean up the graph memory
+    dr.disable_grad(b_impact)
+
+    return final_wavefronts
 
 
 def run_phasor_pipeline(config, particle, collector, theta_internal, theta_requested, ior_real_dr, ior_inv_dr):
@@ -146,16 +161,23 @@ def run_phasor_pipeline(config, particle, collector, theta_internal, theta_reque
     ]
 
     def _run_pass(pol_type):
+        total_intensity = 0
         for ox, oy, rot in batch_params:
-            rays, patches, log_x, log_y = GridEmitter.emit(config.grid_res, grid_width_mm, ox, oy, rot,
-                                                           pol=pol_type)
-            final_wavefronts = _trace_phasor_batch(rays, patches, log_x, log_y, particle, ior_real_dr, ior_inv_dr)
+            # We don't need log_x or log_y anymore, throw them away
+            rays, patches, _, _ = GridEmitter.emit(config.grid_res, grid_width_mm, ox, oy, rot, pol=pol_type)
+
+            # Pass the actual optical parameters to the AD tracer
+            final_wavefronts = _trace_phasor_batch(rays, patches, particle, ior_real_dr, ior_inv_dr)
 
             for batch_rays, batch_patch in final_wavefronts:
                 collector.accumulate(batch_rays, batch_patch, patch_area)
 
             dr.eval(collector._bins_ex_real, collector._bins_ey_real, collector._bins_ez_real)
-        return collector.finalize()
+
+            # Square to intensity INSIDE the loop so batches don't coherently interfere with each other
+            total_intensity += collector.finalize()
+
+        return total_intensity / config.num_batches
 
     # Pass 1: X-Polarized
     intensity_x = _run_pass('X')
@@ -167,12 +189,7 @@ def run_phasor_pipeline(config, particle, collector, theta_internal, theta_reque
 
     # Post-process: Apply diffraction if it's a 1D trace, otherwise interpolate the 2D field
     if collector.num_phi_bins == 1:
-        total_intensity = apply_diffraction_smoothing(
-            theta_rad=theta_internal,
-            intensity=total_raw_intensity,
-            radius_mm=float(radius_mm),
-        )
-        return np.interp(theta_requested, theta_internal, total_intensity).astype(np.float32)
+        return np.interp(theta_requested, theta_internal, total_raw_intensity).astype(np.float32)
     else:
         result = np.zeros((collector.num_phi_bins, len(theta_requested)), dtype=np.float32)
         for p in range(collector.num_phi_bins):
