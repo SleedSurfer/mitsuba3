@@ -33,17 +33,17 @@ class HexagonalCrystalParticle(Particle):
         y = dr.sqrt(u1) * dr.sin(2.0 * np.pi * u3)
         z = dr.sqrt(u1) * dr.cos(2.0 * np.pi * u3)
 
-        R00 = 1.0 - 2.0 * dr.sqr(y) - 2.0 * dr.sqr(z)
+        R00 = 1.0 - 2.0 * dr.square(y) - 2.0 * dr.sqr(z)
         R01 = 2.0 * x * y - 2.0 * w * z
         R02 = 2.0 * x * z + 2.0 * w * y
 
         R10 = 2.0 * x * y + 2.0 * w * z
-        R11 = 1.0 - 2.0 * dr.sqr(x) - 2.0 * dr.sqr(z)
+        R11 = 1.0 - 2.0 * dr.square(x) - 2.0 * dr.sqr(z)
         R12 = 2.0 * y * z - 2.0 * w * x
 
         R20 = 2.0 * x * z - 2.0 * w * y
         R21 = 2.0 * y * z + 2.0 * w * x
-        R22 = 1.0 - 2.0 * dr.sqr(x) - 2.0 * dr.sqr(y)
+        R22 = 1.0 - 2.0 * dr.square(x) - 2.0 * dr.sqr(y)
 
         self.n0 = Array3f(R01, R11, R21)
         self.n1 = Array3f(R00, R10, R20)

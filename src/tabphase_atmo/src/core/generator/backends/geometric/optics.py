@@ -7,19 +7,14 @@ def apply_basis_rotation(ray_Ex, ray_Ey, basis_x, basis_y, d_in, n, d_out, coef_
     Projects the current Ex/Ey phasors onto the local scattering plane, applies
     Fresnel coefficients, and returns the new phasors alongside the new basis vectors.
     """
-    # 1. Compute perpendicular vector (s) to the scattering plane
     s_raw = dr.cross(d_in, n)
     s_norm = dr.norm(s_raw)
 
-    # Anti-NaN protocol: if ray hits dead center, d_in || n, cross product is 0.
-    # We fallback to the current basis_x to avoid exploding the gradients.
     valid_s = s_norm > 1e-6
     s = dr.select(valid_s, s_raw / dr.maximum(s_norm, Float(1e-8)), basis_x)
 
-    # 2. Compute incoming parallel vector (p_in)
     p_in = dr.cross(s, d_in)
 
-    # 3. Project the current wave onto the local s and p_in axes
     dot_x_s = dr.dot(basis_x, s)
     dot_y_s = dr.dot(basis_y, s)
     dot_x_p = dr.dot(basis_x, p_in)
@@ -28,12 +23,9 @@ def apply_basis_rotation(ray_Ex, ray_Ey, basis_x, basis_y, d_in, n, d_out, coef_
     E_perp = ray_Ex * dot_x_s + ray_Ey * dot_y_s
     E_para = ray_Ex * dot_x_p + ray_Ey * dot_y_p
 
-    # 4. Apply Fresnel (complex multiplication)
     E_perp_out = E_perp * coef_perp
     E_para_out = E_para * coef_para
 
-    # 5. Construct the outgoing basis frame
-    # s is invariant across the boundary, but p bends with the new direction
     p_out = dr.cross(s, d_out)
 
     return E_perp_out, E_para_out, s, p_out

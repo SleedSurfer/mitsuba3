@@ -36,6 +36,10 @@ class ParticleMaterial(Enum):
 class DropletComposition(NamedTuple):
     """
     Defines a specific droplet population within the cloud volume.
+    @param shape: Shape of the droplet (sphere or oblate)
+    @param weight: Fractional weight (e.g., 0.4 for 40%)
+    @param radius_mean_um: Mean radius in micrometers (µm)
+    @param variance: Log-normal variance
     """
     shape: DropletShape
     weight: float           # Fractional weight (e.g., 0.4 for 40%)

@@ -53,7 +53,6 @@ def _generate_mix_filename(config: BaseParticleConfig) -> str:
 
 
 def _get_paths(config: BaseParticleConfig, cache_dir: str = "cache"):
-    # Unified path generation so the wrapper stays clean
     root = os.path.join(cache_dir, config.backend.name.lower())
     _ensure_dir(root)
 
@@ -99,21 +98,22 @@ def _resolve_raw_habit(config: BaseParticleConfig, comp_item, raw_dir: str, forc
     raw_path = os.path.join(raw_dir, raw_filename)
 
     if not force_regen and os.path.exists(raw_path):
-        print(f"          -> [Raw Cache Hit] Loading {raw_filename}...")
+        print(f"[Main] Habit found in raw cache, loading {raw_filename}...")
         loaded = np.load(raw_path)
         return loaded['phase'], loaded['mu'], loaded['wl']
 
-    print(f"          -> [SkySim] Cooking raw physical energy: {raw_filename}...")
+    shape_str = comp_item[0].value
+    print(f"[Main] Baking Habit: {shape_str}, {raw_filename}...")
 
     if isinstance(config, DropletConfig):
-        shape_str = comp_item[0].value
         habit_params = {"radius": comp_item[2], "variance": comp_item[3]}
-    else:
-        shape_str = comp_item[0].value
+    elif isinstance(config, HexagonalConfig):
         habit_params = {
             "c_axis": comp_item[2], "a_axis": comp_item[3],
             "variance": comp_item[4], "sun_elevation_deg": config.sun_elevation_deg
         }
+    else:
+        raise ValueError("[Main] Unknown config type for habit generation.")
 
     be = _resolve_backend(config, specific_habit=shape_str)
     shape_table, shape_mu, shape_wl = generate_phase_table(config, backend=be, habit_params=habit_params)
@@ -128,29 +128,25 @@ def create_atmospheric_phase(config: BaseParticleConfig, up_vector: tuple = (0.0
 
     # 1. Final Output Cache Check
     if not force_regen and os.path.exists(bin_path):
-        print(f"[Wrapper] Final Mix Cache Hit: {os.path.basename(bin_path)}")
+        print(f"[Main] Final Mix Cache Hit: {os.path.basename(bin_path)}")
         if generate_polar and not os.path.exists(polar_path):
             visualize_anisotropic(bin_path, polar_path)
         return {"type": "atmosphericphase", "filename": bin_path, "up": up_vector}
 
-    print(f"[Wrapper] Assembling new Mix: {os.path.basename(bin_path)}...")
+    print(f"[Main] Assembling new Mix: {os.path.basename(bin_path)}...")
     master_phase_table, master_mu, master_wl = None, None, None
 
-    # 2. Accumulate Habits
     for comp_item in config.composition:
         variance = comp_item[3] if isinstance(config, DropletConfig) else comp_item[4]
         optical_weight = compute_optical_weight(config, comp_item)
 
-        # Fetch raw energy
         shape_table, shape_mu, shape_wl = _resolve_raw_habit(config, comp_item, raw_dir, force_regen)
 
-        # Apply blur if needed
         if variance >= 0.001:
-            print(f"          -> Applying polydispersity sim (variance={variance:.2f})...")
+            print(f"[Main] Applying polydispersity sim (variance={variance:.2f})...")
             shape_table = apply_polydispersity_filter(shape_table, config.num_angles, variance)
 
-        # Mix into master
-        print(f"          -> Blending habit with Optical Weight: {optical_weight:.4f}")
+        print(f"[Main] Blending habit with Optical Weight: {optical_weight:.4f}")
         if master_phase_table is None:
             master_phase_table = shape_table * optical_weight
             master_mu = shape_mu
@@ -159,16 +155,17 @@ def create_atmospheric_phase(config: BaseParticleConfig, up_vector: tuple = (0.0
             master_phase_table += shape_table * optical_weight
 
     # 3. Finalize and Save
-    print(f"[Wrapper] Normalizing final macroscopic phase volume...")
+    print(f"[Main] Normalizing phase volume...")
     master_phase_table = normalize_macroscopic_phase(master_phase_table, master_mu, config.num_phi_bins)
 
-    print(f"[Wrapper] Saving Master Mix...")
+    print(f"[Main] Saving Master Mix...")
     save_binary_file(bin_path, master_phase_table, master_mu, master_wl, config)
 
     if generate_polar:
         try:
             visualize_anisotropic(bin_path, polar_path)
+            print(f"[Main] Polar plot saved to {polar_path}")
         except Exception as e:
-            print(f"[Wrapper] Polar plot generation failed: {e}")
+            print(f"[Main] Polar plot generation failed: {e}")
 
     return {"type": "atmosphericphase", "filename": bin_path, "up": up_vector}

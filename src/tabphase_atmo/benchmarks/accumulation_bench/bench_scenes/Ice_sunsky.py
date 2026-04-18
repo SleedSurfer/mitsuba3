@@ -1,35 +1,32 @@
-import math
 import mitsuba as mi
-from ..utils import get_asset_path, generate_cloud_grid
+
+from ..utils import (
+    get_asset_path,
+    create_sunsky_emitter,
+    generate_cirrus_grid,
+    assemble_volume_dict,
+    create_sun_aligned_camera
+)
 from src.core.wrapper import create_atmospheric_phase
 
 
-def get_scene(config, phase):
-    # --- 1. MATCH YOUR BAKE ELEVATION ---
-    sun_elevation_deg = 20.0
-    sun_elev_rad = math.radians(sun_elevation_deg)
-
-    # --- 2. Z-UP SUN VECTOR ---
-    # Elevation is the angle above the XY horizon.
-    sun_dir_y = math.cos(sun_elev_rad)
-    sun_dir_z = math.sin(sun_elev_rad)
-    sun_direction = [0.0, sun_dir_y, sun_dir_z]
-
-    # --- 3. THE "GROUND" OBSERVER CAMERA ---
-    # We place the camera beneath the cloud slab (negative Z)
-    # and look directly along the sun vector to keep it dead center.
-    cam_origin = [
-        -5.0 * sun_direction[0],
-        -5.0 * sun_direction[1],
-        -5.0 * sun_direction[2]
-    ]
-    cam_target = [0.0, 0.0, 0.0]
-
-    # --- 4. Z-UP PHASE FUNCTION ---
-    # We MUST tell your phase function generator that gravity is now on the Z-axis,
-    # otherwise your plates will be oriented sideways relative to the sky dome.
+def get_scene(config, phase, sun_elevation_deg=20.0):
+    # 1. Bake the phase function
     phase_dict = create_atmospheric_phase(phase, up_vector=(0.0, 0.0, 1.0), force_regen=False)
 
+    # 2. Bake the physical cloud
+    raw_grid = generate_cirrus_grid(
+        res=128,
+        density_multiplier=0.02,
+        wind_stretch=16.0
+    )
+    cloud_volume_dict = assemble_volume_dict(
+        density_grid=raw_grid,
+        phase_dict=phase_dict,
+        bounds=(2000.0, 2000.0, 5.0)
+    )
+
+    # 3. Assemble the scene payload
     return {
         "type": "scene",
         "integrator": {
@@ -39,11 +36,7 @@ def get_scene(config, phase):
         "sensor": {
             "type": "perspective",
             "fov": 100.0,
-            "to_world": mi.ScalarTransform4f.look_at(
-                origin=cam_origin,
-                target=cam_target,
-                up=(0.0, 0.0, 1.0),  # Camera up is now global Z
-            ),
+            "to_world": create_sun_aligned_camera(sun_elevation_deg, distance=5.0),
             "sampler": {"type": "independent", "sample_count": config.get('batch_size', 1024)},
             "film": {
                 "type": "hdrfilm",
@@ -54,26 +47,25 @@ def get_scene(config, phase):
             }
         },
 
-        # --- NATIVELY Z-UP SUNSKY ---
-        "sky": {
-            "type": "sunsky",
-            "sun_direction": sun_direction,
-            "turbidity": 2.5,  # 2.5 = crisp high-altitude air.
-            "sun_scale": 1.0,  # Tweak this if the sun burns out your halos
-            "sky_scale": 1.0,
-        },
+        "sky": create_sunsky_emitter(
+            sun_elevation_deg=sun_elevation_deg,
+            use_direct_vector=True,
+            turbidity=2.5,
+            sun_scale=1.0
+        ),
 
         "cloud_slab": {
             "type": "cube",
             # In a Z-up world, this makes a wide horizontal plate in the sky (X, Y)
             # that is thin vertically (Z).
-            "to_world": mi.ScalarTransform4f.scale([30.0, 30.0, 0.5]),
+            "to_world": mi.ScalarTransform4f.scale([300.0, 300.0, 0.5]),
             "bsdf": {"type": "null"},
             "interior": {
                 "type": "homogeneous",
-                "sigma_t": 0.03,
+                "sigma_t": 0.15,
                 "albedo": 0.98,
                 "phase": phase_dict,
             },
         },
+        #"cloud_volume": cloud_volume_dict,
     }

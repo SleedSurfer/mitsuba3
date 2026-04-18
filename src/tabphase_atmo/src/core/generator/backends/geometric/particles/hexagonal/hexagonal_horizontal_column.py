@@ -22,11 +22,8 @@ class HorizontalColumn(HexagonalParticle):
         n0_y = dr.sin(tilt)
         cos_tilt = dr.cos(tilt)
 
-        # Initial horizontal axis with flutter
         n0_vec = dr.normalize(Array3f(n0_x * cos_tilt, n0_y, n0_z * cos_tilt))
 
-        # 3. WIRE IN SUN ELEVATION
-        # Rotate the whole crystal frame around X to tilt toward the sun (+Z)
         sun_elev_rad = Float(self.sun_elevation_deg * np.pi / 180.0)
         cos_s = dr.cos(sun_elev_rad)
         sin_s = dr.sin(sun_elev_rad)
@@ -35,16 +32,15 @@ class HorizontalColumn(HexagonalParticle):
         final_n0_z = n0_vec.y * sin_s + n0_vec.z * cos_s
         self.n0 = dr.normalize(Array3f(n0_vec.x, final_n0_y, final_n0_z))
 
-        # 4. Create Basis for the Roll (using the new Tilted Up)
         tilted_up = Array3f(0.0, cos_s, sin_s)
         b1 = dr.normalize(dr.cross(self.n0, tilted_up))
         b2 = dr.cross(self.n0, b1)
 
-        # 5. Random Roll
+        # Random Roll
         roll = rng.next_float32() * 2.0 * np.pi
         self.n1 = b1 * dr.cos(roll) + b2 * dr.sin(roll)
 
-        # 6. Generate remaining faces
+        # Generate remaining faces
         s32 = Float(np.sqrt(3.0) / 2.0)
         cross_01 = dr.cross(self.n0, self.n1)
         self.n2 = self.n1 * 0.5 + cross_01 * s32

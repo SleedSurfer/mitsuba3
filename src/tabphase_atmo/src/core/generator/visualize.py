@@ -35,7 +35,6 @@ def load_binary_file(filename: str):
         total_floats = num_angles * num_phi_bins * num_wvls
         data_flat = np.frombuffer(f.read(total_floats * 4), dtype=np.float32)
 
-        # Invert the interleaving: Disk is (Theta, Phi, Wvl) -> Array is (Wvl, Phi, Theta)
         phase_interleaved = data_flat.reshape((num_angles, num_phi_bins, num_wvls))
         phase_table = phase_interleaved.transpose(2, 1, 0)
 
@@ -50,39 +49,33 @@ def visualize_anisotropic(input_filename: str, output_image: str | None = None):
     phi_deg = np.linspace(0, 360, n_phis)
     wavelengths = np.linspace(min_w, max_w, n_wvls)
 
-    # Grab the middle wavelength (usually ~550nm Green) for structural visualization
     mid_wvl_idx = n_wvls // 2
     wvl_slice = data[mid_wvl_idx, :, :]
 
     # --- PLOT SETUP ---
     fig = plt.figure(figsize=(18, 8))
 
-    # Check if we actually have anisotropic data
     if n_phis > 1:
         # ==========================================
         # PANEL 1: UNROLLED SKY HEATMAP (Phi vs Theta)
         # ==========================================
         ax1 = fig.add_subplot(121)
 
-        # Cut Forward Scattering for the Heatmap (skip first 5 degrees)
         cutoff_idx = int(n_angles * (5.0 / 180.0))
         slice_cut = wvl_slice[:, cutoff_idx:]
         theta_cut = theta_deg[cutoff_idx:]
 
         X, Y = np.meshgrid(theta_cut, phi_deg)
 
-        # Stop using percentile for vmax on specular objects! Grab the actual peak.
         vmin = np.percentile(slice_cut, 1)
         vmax = np.max(slice_cut)
 
-        # Idiot-proof the bounds so Matplotlib never pukes again
         safe_vmax = max(vmax, 1e-4)
         safe_vmin = max(vmin, 1e-5)
 
         if safe_vmin >= safe_vmax:
             safe_vmin = safe_vmax / 10.0
 
-        # THE FIX: Force the slice to have a microscopic floor so it renders dark purple instead of transparent white
         safe_slice = np.maximum(slice_cut, 1e-12)
 
         im = ax1.pcolormesh(X, Y, safe_slice, shading='auto', cmap='turbo',
@@ -125,9 +118,6 @@ def visualize_anisotropic(input_filename: str, output_image: str | None = None):
         ax2.legend(loc='lower right')
 
     else:
-        # ==========================================
-        # FALLBACK: STANDARD 1D SPHERICAL PLOTS
-        # ==========================================
         print("[Vis] Detected isotropic data (num_phi_bins=1). Falling back to standard visualization.")
 
         ax1 = fig.add_subplot(121)

@@ -7,7 +7,6 @@ from .base import ScatteringBackend, ParticleSize
 
 from .geometric.particles.base_particle import SphericalParticle, PrismParticle
 from .geometric.particles.particle_factory import build_particle
-# The Collectors
 from .geometric.Collectors.photon_collector import PhotonCollectionSphere
 from .geometric.Collectors.grid_collector import CollectionSphere
 from .geometric.pipelines.pipeline_phasor import run_phasor_pipeline
@@ -35,7 +34,6 @@ class DrJitRaytracerBackend(ScatteringBackend):
         particle = build_particle(self.particle_shape, size, self.sun_elevation_deg, self.air_turbulence_factor)
 
         if isinstance(particle, PrismParticle):
-            # Photon path: 1:1 resolution with output
             res = len(theta_requested)
             theta_internal = np.linspace(0.0, np.pi, res)
 
@@ -47,7 +45,6 @@ class DrJitRaytracerBackend(ScatteringBackend):
             )
 
         elif isinstance(particle, SphericalParticle):
-            # Phasor path: High-res internal for interference stability
 
             collector = CollectionSphere(theta_bins=theta_requested,
                                          num_phi_bins=self.num_phi_bins,

@@ -7,19 +7,14 @@ def compute_optical_weight(config: BaseParticleConfig, comp_item) -> float:
     if isinstance(config, DropletConfig):
         shape_enum, weight, radius, variance = comp_item
 
-        # Sphere: Area = pi*r^2, Volume = (4/3)*pi*r^3
-        # Area / Volume = 0.75 / r
         area_vol_ratio = 0.75 / max(radius, 1e-6)
 
     else:
         shape_enum, weight, c_axis, a_axis, variance = comp_item
 
-        # Hexagonal Prism (a_axis = side length, c_axis = height/length)
-        # 1. True Volume
         base_area = (3.0 * np.sqrt(3.0) / 2.0) * (a_axis ** 2)
         volume = base_area * c_axis
 
-        # 2. Average Projected Area (Cauchy's Theorem: S_total / 4)
         s_total = (2.0 * base_area) + (6.0 * a_axis * c_axis)
         projected_area = s_total / 4.0
 

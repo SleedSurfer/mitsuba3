@@ -16,6 +16,5 @@ class MiePythonBackend(ScatteringBackend):
         wavelength_um = wavelength_nm / 1000.0
         x = 2.0 * np.pi * size.r_um / max(wavelength_um, 1e-12)
 
-        # Quarantine the mu conversion here.
         mu_quarantined = np.cos(theta)
         return miepython.i_unpolarized(m, x, mu_quarantined)

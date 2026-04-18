@@ -154,7 +154,6 @@ def run_phasor_pipeline(config, particle, collector, theta_internal, theta_reque
     patch_area = (grid_width_mm / config.grid_res) ** 2
     step_size = grid_width_mm / (config.grid_res - 1) if config.grid_res > 1 else 0.0
 
-    # Pre-generate jittered batch offsets to avoid aliasing
     batch_params = [
         ((np.random.rand() - 0.5) * step_size, (np.random.rand() - 0.5) * step_size, np.random.rand() * np.pi * 2.0)
         for _ in range(config.num_batches)
@@ -163,10 +162,8 @@ def run_phasor_pipeline(config, particle, collector, theta_internal, theta_reque
     def _run_pass(pol_type):
         total_intensity = 0
         for ox, oy, rot in batch_params:
-            # We don't need log_x or log_y anymore, throw them away
             rays, patches, _, _ = GridEmitter.emit(config.grid_res, grid_width_mm, ox, oy, rot, pol=pol_type)
 
-            # Pass the actual optical parameters to the AD tracer
             final_wavefronts = _trace_phasor_batch(rays, patches, particle, ior_real_dr, ior_inv_dr)
 
             for batch_rays, batch_patch in final_wavefronts:
@@ -174,7 +171,6 @@ def run_phasor_pipeline(config, particle, collector, theta_internal, theta_reque
 
             dr.eval(collector._bins_ex_real, collector._bins_ey_real, collector._bins_ez_real)
 
-            # Square to intensity INSIDE the loop so batches don't coherently interfere with each other
             total_intensity += collector.finalize()
 
         return total_intensity / config.num_batches
@@ -187,7 +183,6 @@ def run_phasor_pipeline(config, particle, collector, theta_internal, theta_reque
 
     total_raw_intensity = (intensity_x + intensity_y) / 2.0
 
-    # Post-process: Apply diffraction if it's a 1D trace, otherwise interpolate the 2D field
     if collector.num_phi_bins == 1:
         return np.interp(theta_requested, theta_internal, total_raw_intensity).astype(np.float32)
     else:
