@@ -2,7 +2,7 @@ import os
 import numpy as np
 
 from filters import apply_polydispersity_filter
-from utils.wrapper_math import compute_optical_weight, normalize_macroscopic_phase
+from utils.wrapper_math import compute_optical_weight, normalize_macroscopic_phase, apply_similarity_truncation
 from .generator.backends import (
     MiePythonBackend,
     MieReferenceBackend,
@@ -154,9 +154,22 @@ def create_atmospheric_phase(config: BaseParticleConfig, up_vector: tuple = (0.0
         else:
             master_phase_table += shape_table * optical_weight
 
-    # 3. Finalize and Save
-    print(f"[Main] Normalizing phase volume...")
-    master_phase_table = normalize_macroscopic_phase(master_phase_table, master_mu, config.num_phi_bins)
+    # 3. Finalize and Apply Similarity Theory (Phase Truncation)
+    print(f"[Main] Applying Similarity Theory (Truncating at 20.0)...")
+    master_phase_table, f_fractions = apply_similarity_truncation(
+        master_phase_table, master_mu, config.num_phi_bins, threshold=1.0
+    )
+
+    # Calculate average scaling factor for the console readout
+    f_mean = np.mean(f_fractions)
+    scale_factor = 1.0 - f_mean
+
+    print(f"\n===========================================================")
+    print(f"🚨 SIMILARITY THEORY APPLIED 🚨")
+    print(f"Forward peak truncated. Missing energy converted to transmittance.")
+    print(f"Avg Energy Removed (f): {f_mean:.4f}")
+    print(f"--> MULTIPLY YOUR `sigma_s` IN MITSUBA BY: {scale_factor:.4f}")
+    print(f"===========================================================\n")
 
     print(f"[Main] Saving Master Mix...")
     save_binary_file(bin_path, master_phase_table, master_mu, master_wl, config)

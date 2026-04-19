@@ -135,11 +135,9 @@ public:
                                         Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::PhaseFunctionEvaluate, active);
 
-        // 1. Calculate Theta
         Float mu = -dr::dot(wo, mi.wi);
         Float theta = dr::acos(dr::clip(mu, -1.f, 1.f));
 
-        // 2. Calculate Phi (Aligned to Gravity/Up vector)
         Vector3f s = dr::cross(m_up, mi.wi);
         Float s_norm = dr::norm(s);
         Mask valid_s = s_norm > 1e-6f;
@@ -151,42 +149,59 @@ public:
         Float phi = dr::atan2(wo_t, wo_s);
         phi = dr::select(phi < 0.f, phi + 2.f * dr::Pi<Float>, phi);
 
-        // 3. Evaluate Data
-        Spectrum value = lookup_interpolated(mi.wavelengths, theta, phi, active);
+        // Fetch raw grid data
+        Spectrum actual_value = lookup_nearest(mi.wavelengths, theta, phi, active);
 
-        Float w_idx = dr::clip((mi.wavelengths[0] - m_min_wavelength) * m_wavelength_scale, 0.f, ScalarFloat(m_num_channels - 1));
-        UInt32 w_int = dr::round2int<UInt32>(w_idx);
-        Float norm = dr::gather<Float>(m_pdf_norm, w_int, active);
+        // 🚨 SQUASH THE PEAK (Retains colors, kills the 10,000x explosion)
+        Spectrum value = dr::minimum(actual_value, 20.0f);
 
-        Float pdf = 0.f;
+        // TRUE SPECTRAL MIS: Average the PDF across all wavelengths to bridge the ravines
+        Float pdf_avg = 0.f;
         if constexpr (is_spectral_v<Spectrum>) {
-             pdf = value[0] / norm;
-        } else {
-             pdf = dr::mean(value) / norm;
+            for (size_t i = 0; i < Spectrum::Size; ++i) {
+                Float w_idx_i = dr::clip((mi.wavelengths[i] - m_min_wavelength) * m_wavelength_scale, 0.f, ScalarFloat(m_num_channels - 1));
+                UInt32 w_int_i = dr::round2int<UInt32>(w_idx_i);
+                Float norm_i = dr::gather<Float>(m_pdf_norm, w_int_i, active);
+                pdf_avg += value[i] / dr::maximum(norm_i, 1e-8f);
+            }
+            pdf_avg /= ScalarFloat(Spectrum::Size);
         }
 
-        return { value, pdf };
+        return { value, pdf_avg };
     }
 
     std::tuple<Vector3f, Spectrum, Float>
     sample(const PhaseFunctionContext & /*ctx*/,
            const MediumInteraction3f &mi,
-           Float /*sample1*/, const Point2f &sample2,
+           Float sample1, const Point2f &sample2,
            Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::PhaseFunctionSample, active);
 
-        Float w_idx = dr::clip((mi.wavelengths[0] - m_min_wavelength) * m_wavelength_scale, 0.f, ScalarFloat(m_num_channels - 1));
+        // ONE-SAMPLE MIS: Randomly select the driver wavelength
+        Float driver_wvl = mi.wavelengths[0];
+        if constexpr (is_spectral_v<Spectrum>) {
+            UInt32 driver_idx = dr::minimum(dr::floor2int<UInt32>(sample1 * Spectrum::Size), UInt32(Spectrum::Size - 1));
+            for (size_t i = 1; i < Spectrum::Size; ++i) {
+                driver_wvl = dr::select(driver_idx == UInt32(i), mi.wavelengths[i], driver_wvl);
+            }
+        }
+
+        Float w_idx = dr::clip((driver_wvl - m_min_wavelength) * m_wavelength_scale, 0.f, ScalarFloat(m_num_channels - 1));
         UInt32 w_int = dr::round2int<UInt32>(w_idx);
 
-        // Sample Theta (Marginal)
+        // Sample using the driver
         Float theta = sample_cdf_continuous(sample2.x(), m_marginal_cdf, w_int * m_theta_bins, m_theta_bins, dr::Pi<Float>, active);
-
-        // Sample Phi (Conditional)
         UInt32 t_int = dr::clip(dr::round2int<UInt32>(theta * (Float(m_theta_bins - 1) * dr::InvPi<Float>)), 0u, m_theta_bins - 1u);
         UInt32 cond_offset = w_int * (m_theta_bins * m_phi_bins) + t_int * m_phi_bins;
         Float phi = sample_cdf_continuous(sample2.y(), m_conditional_cdf, cond_offset, m_phi_bins, 2.f * dr::Pi<Float>, active);
 
-        // Build Gravity-Aligned Frame
+        // 🚨 GEOMETRIC SNAP (Force the ray to align with the discrete bin)
+        Float d_theta = dr::Pi<Float> / Float(m_theta_bins - 1);
+        theta = dr::round2int<Float>(theta / d_theta) * d_theta;
+
+        Float d_phi = 2.f * dr::Pi<Float> / Float(m_phi_bins > 1 ? m_phi_bins - 1 : 1);
+        phi = dr::round2int<Float>(phi / d_phi) * d_phi;
+
         Vector3f s = dr::cross(m_up, mi.wi);
         Float s_norm = dr::norm(s);
         Mask valid_s = s_norm > 1e-6f;
@@ -199,17 +214,28 @@ public:
         Vector3f wo_local{ sin_theta * cos_phi, sin_theta * sin_phi, -cos_theta };
         Vector3f wo = s * wo_local.x() + t * wo_local.y() + mi.wi * wo_local.z();
 
-        Spectrum value = lookup_interpolated(mi.wavelengths, theta, phi, active);
-        Float norm = dr::gather<Float>(m_pdf_norm, w_int, active);
-        Float pdf = 0.f;
+        // Fetch raw grid data
+        Spectrum actual_value = lookup_nearest(mi.wavelengths, theta, phi, active);
 
+        // 🚨 SQUASH THE PEAK
+        Spectrum value = dr::minimum(actual_value, 20.0f);
+
+        // TRUE SPECTRAL MIS
+        Float pdf_avg = 0.f;
         if constexpr (is_spectral_v<Spectrum>) {
-             pdf = value[0] / norm;
-        } else {
-             pdf = dr::mean(value) / norm;
+            for (size_t i = 0; i < Spectrum::Size; ++i) {
+                Float w_idx_i = dr::clip((mi.wavelengths[i] - m_min_wavelength) * m_wavelength_scale, 0.f, ScalarFloat(m_num_channels - 1));
+                UInt32 w_int_i = dr::round2int<UInt32>(w_idx_i);
+                Float norm_i = dr::gather<Float>(m_pdf_norm, w_int_i, active);
+                pdf_avg += value[i] / dr::maximum(norm_i, 1e-8f);
+            }
+            pdf_avg /= ScalarFloat(Spectrum::Size);
         }
 
-        return { wo, Spectrum(1.f), pdf };
+        // Final Weight
+        Spectrum weight = dr::select(pdf_avg > 1e-8f, value / pdf_avg, 0.f);
+
+        return { wo, weight, pdf_avg };
     }
 
     std::string to_string() const override {
@@ -226,6 +252,29 @@ public:
     }
 
 private:
+
+    Spectrum lookup_nearest(const Wavelength &wvls, Float theta, Float phi, Mask active) const {
+        if constexpr (is_spectral_v<Spectrum>) {
+            Spectrum result;
+
+            // Snap directly to the nearest integer bin index
+            UInt32 a_idx = dr::clip(dr::round2int<UInt32>(theta * (Float(m_theta_bins - 1) * dr::InvPi<Float>)), 0u, m_theta_bins - 1u);
+            UInt32 p_idx = dr::clip(dr::round2int<UInt32>(phi * (Float(m_phi_bins > 1 ? m_phi_bins - 1 : 1) * dr::InvTwoPi<Float>)), 0u, UInt32(m_phi_bins > 1 ? m_phi_bins - 1 : 0));
+
+            UInt32 stride_p = m_num_channels;
+            UInt32 stride_a = m_phi_bins * m_num_channels;
+
+            for (size_t i = 0; i < Spectrum::Size; ++i) {
+                Float w_idx = dr::clip((wvls[i] - m_min_wavelength) * m_wavelength_scale, 0.f, ScalarFloat(m_num_channels - 1));
+                UInt32 w_int = dr::clip(dr::round2int<UInt32>(w_idx), 0u, m_num_channels - 1u);
+
+                result[i] = dr::gather<Float>(m_data, a_idx * stride_a + p_idx * stride_p + w_int, active);
+            }
+            return result;
+        } else {
+            return 0.f;
+        }
+    }
 
     // Continuous fractional CDF sampling (Prevents heavy pixelation in the render)
     MI_INLINE Float sample_cdf_continuous(const Float &u, const FloatStorage& cdf_array, UInt32 base_offset, UInt32 resolution, Float max_val, Mask active) const {

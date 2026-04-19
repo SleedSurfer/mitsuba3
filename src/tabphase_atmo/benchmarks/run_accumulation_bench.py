@@ -11,10 +11,10 @@ from accumulation_bench.bench_scenes import Ice_sunsky, pure_rainbow,mitsuba3cor
 
 # --- CONFIG ---
 CONFIG = {
-    'target_spp': 512*16,
-    'batch_size': 128,
-    'res_w': 256,
-    'res_h': 256,
+    'target_spp': 512*8,
+    'batch_size': 64,
+    'res_w': 1024,
+    'res_h': 1024,
     'downscale_res': (512, 512),
     'show_previews': False,
     'denoise_enabled': False,
@@ -23,15 +23,26 @@ CONFIG = {
 if __name__ == "__main__":
     print("Wake the fuck up samurai, we have a cpu to burn.")
 
-    mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 50.0, 0.0)],
+    # mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 50.0, 0.0)],
+    #                         num_angles=4096,
+    #                         num_wavelengths=6,
+    #                         num_phi_bins=360,
+    #                         backend=BackendType.DRJIT)
+    #
+    # run_name = f"mitsuba3cornell/RTSphereLight_emitter_facing_wall/beam"
+    # scene_dict = cornell_fog_sphere.get_scene(CONFIG,mist)
+    # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
+
+    mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 10.0, 0.0)],
                             num_angles=4096,
                             num_wavelengths=6,
                             num_phi_bins=360,
                             backend=BackendType.MIEPYTHON)
 
-    run_name = f"mitsuba3cornell/MieSphereLight_emitter_facing_wall/Mie_beam"
-    scene_dict = cornell_fog_sphere.get_scene(CONFIG,mist)
+    run_name = f"mitsuba3cornell/MieSphereLight_emitter_facing_wall_final/10um"
+    scene_dict = cornell_fog_sphere.get_scene(CONFIG, mist)
     run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
+
 
     # #CBOX default:
     # run_name = f"mitsuba3cornell/HGSphere09/"

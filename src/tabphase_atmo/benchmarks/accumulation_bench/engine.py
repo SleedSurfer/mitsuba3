@@ -48,7 +48,7 @@ def run_render_bench(scene_dict, run_name, config):
 
         # Preview Logic
         is_early = pass_num in [1, 2, 3, 5, 10, 20]
-        is_periodic = pass_num > 50 and pass_num % 10 == 0
+        is_periodic = pass_num > 20 and pass_num % 10 == 0
 
         if is_early or is_periodic:
             temp_img = acc_buffer / pass_num

@@ -12,7 +12,7 @@ def get_scene(config, phase=None, sun_elevation_deg=20.0):
 
         "integrator": {
             "type": "volpath",
-            "max_depth": 32  # Still a thermal hazard, but you do you
+            "max_depth": -1  # Still a thermal hazard, but you do you
         },
 
         "sensor": {
@@ -71,12 +71,24 @@ def get_scene(config, phase=None, sun_elevation_deg=20.0):
             ),
             # Spotlights use radiant intensity (W/sr) instead of radiance.
             # Because we are choking the beam angle so hard, it needs massive juice.
-            "intensity": {"type": "rgb", "value": [10.0, 10.0, 10.0]},
-            "cutoff_angle": 25.0,  # The hard boundary of the beam
+            "intensity": {"type": "rgb", "value": [8.0, 8.0, 8.0]},
+            "cutoff_angle": 22.0,  # The hard boundary of the beam
             "beam_width": 7.0  # The inner core where the light starts fading out
         },
 
-        # "frontlight": {
+        # --- The Silver Lining / Rim Emitter ---
+        "rimlight": {
+            "type": "spot",
+            "to_world": mi.ScalarTransform4f.look_at(
+                origin=[-0.3, -0.5, -0.7],  # EXACTLY behind the sphere center
+                target=[-0.3, -0.5, 0.2],   # Aiming exactly forward at the center
+                up=[0, 1, 0]
+            ),
+            "intensity": {"type": "rgb", "value": [15.0, 15.0, 23.0]},
+            "cutoff_angle": 45.0,
+            "beam_width": 30.0
+        },
+        # "diskfrontlight": {
         #     "type": "disk",
         #     # Z=0.9 puts it in front of the sphere (which extends to Z=0.7).
         #     # Y=-0.25 puts it perfectly slightly above the equator.
@@ -127,7 +139,7 @@ def get_scene(config, phase=None, sun_elevation_deg=20.0):
             "bsdf": {"type": "null"},
             "interior": {
                 "type": "homogeneous",
-                "sigma_t": 10.0,
+                "sigma_t": 16.0,
                 "albedo": 0.9,
                 "phase": phase#{"type": "hg", "g": 0.5}
             }
