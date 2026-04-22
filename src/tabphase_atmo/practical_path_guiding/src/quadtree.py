@@ -405,24 +405,21 @@ class QuadTree:
 		"""
 		return self.quadTreeNode.createRootNode(numRootNode)
 
-
 	def addDataPropagate(self, rootIndex: mi.UInt32, surfaceInteractionRecord: SurfaceInteractionRecord) -> None:
 		"""
-			Traverse the tree and add data along the way until reach the corresponding leaf node.
-			Both rootIndex and surfaceInteractionRecord must have the same size!
-			- rootIndex: index of tree root (0, 1, 2, ...).
-			- surfaceInteractionRecord: contains interaction data on the surface.
-		"""
+            Traverse the tree and add data along the way until reach the corresponding leaf node.
+            Both rootIndex and surfaceInteractionRecord must have the same size!
+            - rootIndex: index of tree root (0, 1, 2, ...).
+            - surfaceInteractionRecord: contains interaction data on the surface.
+        """
 
-		
-		def addIrradiancePropagate( position: mi.Vector2f, irradiance: mi.Float ):
-
-			# 	Start with searching index at root node
-			nodeIndex = dr.gather( mi.UInt32, self.quadTreeNode.rootNodeIndex, rootIndex )
+		def addIrradiancePropagate(position: mi.Vector2f, irradiance: mi.Float):
+			#     Start with searching index at root node
+			nodeIndex = dr.gather(mi.UInt32, self.quadTreeNode.rootNodeIndex, rootIndex)
 
 			# Test if data is within the root node bbox
-			rootNodeBBox = self.quadTreeNode.getBBox( nodeIndex )
-			active = rootNodeBBox.contains( position )
+			rootNodeBBox = self.quadTreeNode.getBBox(nodeIndex)
+			active = rootNodeBBox.contains(position)
 
 			loop_state = (active, nodeIndex)
 
@@ -471,29 +468,32 @@ class QuadTree:
 			# May not needed
 			dr.eval(self.quadTreeNode.irradiance)
 
-
-		# 
+		#
 		# Add path-irradiance
-		# 
-
-		# Position
+		#
 		position = surfaceInteractionRecord.direction
-		# Irradiance
-		irradiance = dr.select( surfaceInteractionRecord.woPdf > 0, surfaceInteractionRecord.radiance / surfaceInteractionRecord.woPdf, 0 )
 
-		addIrradiancePropagate( position, irradiance )
+		# We strip the dr.select and woPdf division.
+		# The data from the integrator is already the fully resolved estimator.
+		irradiance = surfaceInteractionRecord.radiance
+		irradiance = dr.minimum(irradiance, 10000.0)
 
-		if( self.isStoreNEERadiance ):
-			# 
+		addIrradiancePropagate(position, irradiance)
+
+		if (self.isStoreNEERadiance):
+			#
 			# Add NEE-irradiance
-			# 
+			#
 			position = surfaceInteractionRecord.direction_nee
-			# Irradiance
-			radiance_nee = mi.luminance( surfaceInteractionRecord.radiance_nee )
-			irradiance_nee = dr.select( surfaceInteractionRecord.woPdf > 0, radiance_nee / surfaceInteractionRecord.woPdf, 0 )
 
-			addIrradiancePropagate( position, irradiance_nee )
-		
+			# Bypass mi.luminance for Spectral compatibility
+			radiance_nee = sum(surfaceInteractionRecord.radiance_nee) / len(surfaceInteractionRecord.radiance_nee)
+
+			# Same shit here. The em_weight passed from the integrator is already
+			# perfectly divided by the NEE pdf, so we just pass it straight through.
+			irradiance_nee = radiance_nee
+			irradiance_nee = dr.minimum(irradiance_nee, 10000.0)
+			addIrradiancePropagate(position, irradiance_nee)
 
 
 	def validateQuadTreeNodeBBox(self, quadTreeNode: QuadTreeNode) -> bool:
@@ -602,45 +602,45 @@ class QuadTree:
 		# 
 		# Traverse the tree and merge small nodes until reach leaf node
 		# Start from the root node
-		parentNodeIndex = dr.gather( mi.UInt32, self.quadTreeNode.rootNodeIndex, rootIndex )
-
-		active = dr.width( parentNodeIndex ) > 0
-		while active:
-
-			# Check condition
-			# 	Is not leaf node
-			isLeafNode = dr.gather(mi.Bool, self.quadTreeNode.isLeaf, parentNodeIndex)
-			isNotLeafNode = ~isLeafNode
-			# 	Is irradiance less than threshold
-			irradiance = dr.gather(mi.Float, self.quadTreeNode.irradiance, parentNodeIndex)
-			refinementThreshold = dr.gather( mi.Float, self.quadTreeNode.refinementThreshold, parentNodeIndex )
-			smallParentCondition = isNotLeafNode & ( irradiance < refinementThreshold )
-
-			# Gather all node that passed the condition
-			smallParentNodeIndex = dr.gather(mi.UInt32, parentNodeIndex, dr.compress(smallParentCondition) )
-
-			# Merge children of the small parent node
-			self.quadTreeNode.merge( smallParentNodeIndex )
-
-			# Gather valid parent node index for the new iteration
-			normalParentCondition = isNotLeafNode & ( irradiance >= refinementThreshold )
-			validParentNodeIndex = dr.gather(mi.UInt32, parentNodeIndex, dr.compress(normalParentCondition) )
-
-			# Gather children's index
-			child_1_index = dr.gather(mi.UInt32, self.quadTreeNode.child_1_index, validParentNodeIndex)
-			child_2_index = dr.gather(mi.UInt32, self.quadTreeNode.child_2_index, validParentNodeIndex)
-			child_3_index = dr.gather(mi.UInt32, self.quadTreeNode.child_3_index, validParentNodeIndex)
-			child_4_index = dr.gather(mi.UInt32, self.quadTreeNode.child_4_index, validParentNodeIndex)
-
-			# Set children index to be parent of the new iteration
-			parentNodeIndex = concatDrJitArray(
-				concatDrJitArray(child_1_index, child_2_index),
-				concatDrJitArray(child_3_index, child_4_index)
-			)
-
-			# Continue if there is atleast one node
-			active = dr.width(parentNodeIndex) > 0
-
+		# parentNodeIndex = dr.gather( mi.UInt32, self.quadTreeNode.rootNodeIndex, rootIndex )
+		#
+		# active = dr.width( parentNodeIndex ) > 0
+		# while active:
+		#
+		# 	# Check condition
+		# 	# 	Is not leaf node
+		# 	isLeafNode = dr.gather(mi.Bool, self.quadTreeNode.isLeaf, parentNodeIndex)
+		# 	isNotLeafNode = ~isLeafNode
+		# 	# 	Is irradiance less than threshold
+		# 	irradiance = dr.gather(mi.Float, self.quadTreeNode.irradiance, parentNodeIndex)
+		# 	refinementThreshold = dr.gather( mi.Float, self.quadTreeNode.refinementThreshold, parentNodeIndex )
+		# 	smallParentCondition = isNotLeafNode & ( irradiance < refinementThreshold )
+		#
+		# 	# Gather all node that passed the condition
+		# 	smallParentNodeIndex = dr.gather(mi.UInt32, parentNodeIndex, dr.compress(smallParentCondition) )
+		#
+		# 	# Merge children of the small parent node
+		# 	self.quadTreeNode.merge( smallParentNodeIndex )
+		#
+		# 	# Gather valid parent node index for the new iteration
+		# 	normalParentCondition = isNotLeafNode & ( irradiance >= refinementThreshold )
+		# 	validParentNodeIndex = dr.gather(mi.UInt32, parentNodeIndex, dr.compress(normalParentCondition) )
+		#
+		# 	# Gather children's index
+		# 	child_1_index = dr.gather(mi.UInt32, self.quadTreeNode.child_1_index, validParentNodeIndex)
+		# 	child_2_index = dr.gather(mi.UInt32, self.quadTreeNode.child_2_index, validParentNodeIndex)
+		# 	child_3_index = dr.gather(mi.UInt32, self.quadTreeNode.child_3_index, validParentNodeIndex)
+		# 	child_4_index = dr.gather(mi.UInt32, self.quadTreeNode.child_4_index, validParentNodeIndex)
+		#
+		# 	# Set children index to be parent of the new iteration
+		# 	parentNodeIndex = concatDrJitArray(
+		# 		concatDrJitArray(child_1_index, child_2_index),
+		# 		concatDrJitArray(child_3_index, child_4_index)
+		# 	)
+		#
+		# 	# Continue if there is atleast one node
+		# 	active = dr.width(parentNodeIndex) > 0
+		#
 
 		# 
 		# 	Split condition
@@ -1022,6 +1022,8 @@ class QuadTree:
 			child_2_irradiance += child_1_irradiance
 			child_3_irradiance += child_2_irradiance
 			child_4_irradiance += child_3_irradiance
+
+
 
 			# Sampling a range
 			sample_irradiance = sampler.next_1d() * child_4_irradiance

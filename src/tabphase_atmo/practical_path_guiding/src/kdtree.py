@@ -361,7 +361,7 @@ class KDTree:
 	
 	def setRefinementThreshold(self, iteration: int) -> None:
 		# This constant is from the paper
-		c = 12000
+		c = 500
 		self.maxLeafSize = c * math.sqrt( math.pow(2, iteration) )
 
 	
