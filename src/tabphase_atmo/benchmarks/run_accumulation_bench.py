@@ -8,13 +8,18 @@ mi.set_variant("llvm_spectral")
 
 from accumulation_bench.engine import run_render_bench
 from accumulation_bench.bench_scenes import Ice_sunsky, pure_rainbow,mitsuba3cornell,cornell_fog_sphere
+import accumulation_bench.bench_scenes.cornell_exact as fogbox
 
 # --- CONFIG ---
 CONFIG = {
-    'target_spp': 512*8,
+    'target_spp': -1,
     'batch_size': 64,
-    'res_w': 1024,
-    'res_h': 1024,
+    #'res_w':512,
+    #'res_w':1024,
+    #'res_h':512,
+    #'res_h':1024,
+    'res_w':128,
+    'res_h':128,
     'downscale_res': (512, 512),
     'show_previews': False,
     'denoise_enabled': False,
@@ -23,26 +28,47 @@ CONFIG = {
 if __name__ == "__main__":
     print("Wake the fuck up samurai, we have a cpu to burn.")
 
-    # mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 50.0, 0.0)],
-    #                         num_angles=4096,
-    #                         num_wavelengths=6,
-    #                         num_phi_bins=360,
-    #                         backend=BackendType.DRJIT)
-    #
+    mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 50.0, 0.01)],
+                            num_angles=4096,
+                            num_wavelengths=17,
+                            num_phi_bins=360,
+                            backend=BackendType.MIEPYTHON)
+
     # run_name = f"mitsuba3cornell/RTSphereLight_emitter_facing_wall/beam"
     # scene_dict = cornell_fog_sphere.get_scene(CONFIG,mist)
     # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
 
-    mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 10.0, 0.0)],
-                            num_angles=4096,
-                            num_wavelengths=6,
-                            num_phi_bins=360,
-                            backend=BackendType.MIEPYTHON)
+    # mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0,8.0, 0.5)],
+    #                         num_angles=4096,
+    #                         num_wavelengths=17,
+    #                         num_phi_bins=360,
+    #                         backend=BackendType.MIEPYTHON)
+    # run_name = f"mietest/20um"
+    # scene_dict = pure_rainbow.get_scene(CONFIG, mist)
+    # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
 
-    run_name = f"mitsuba3cornell/MieSphereLight_emitter_facing_wall_final/10um"
+    # rain = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 2000.0, 0.0)],
+    #                         num_angles=8192*2,
+    #                         num_wavelengths=17,
+    #                         num_phi_bins=360,
+    #                         backend=BackendType.DRJIT)
+
+    run_name = f"blowouts"
     scene_dict = cornell_fog_sphere.get_scene(CONFIG, mist)
     run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
 
+
+    #run_name = f"Jittest/2000um"
+    # scene_dict = pure_rainbow.get_scene(CONFIG, rain)
+    # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
+
+    # run_name = f"mitsuba3cornell/MieSphereLight_emitter_facing_wall_final/20um"
+    # scene_dict = cornell_fog_sphere.get_scene(CONFIG, mist)
+    # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
+
+    # run_name = f"mitsuba3cornell/MieFogRoom/8um"
+    # scene_dict = fogbox.get_scene(config=CONFIG,phase=mist)
+    # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
 
     # #CBOX default:
     # run_name = f"mitsuba3cornell/HGSphere09/"
@@ -66,7 +92,7 @@ if __name__ == "__main__":
     #     backend=BackendType.DRJIT,
     #     composition=[DropletComposition(DropletShape.SPHERE, 1.0,500.0, 0.04)],
     # )
-    # run_name = f"rainbow_rt/size_500/"
+    # run_name = f"rainbow_rt/size_500/test"
     # scene_dict = pure_rainbow.get_scene(CONFIG, cfg)
     #
     # print(f"\n>>> STARTING BATCH")
@@ -77,8 +103,8 @@ if __name__ == "__main__":
     #     run_name=run_name,
     #     config=CONFIG,
     # )
-
-
+    #
+    #
     # SUN_ELEVATION = 22.0
     # TURBULENCE = 1
     # cfg = Particle.hexagonal(
@@ -95,7 +121,7 @@ if __name__ == "__main__":
     #         HexagonalComposition(HexagonalHabit.PARRY, 0.2, 1500, 800, 0.05)
     #     ]
     # )
-
+    #
     # run_name = f"Halo_Mixed/turb_{TURBULENCE}/elev_{SUN_ELEVATION}"
     # scene_dict = Ice_sunsky.get_scene(CONFIG, cfg, sun_elevation_deg=SUN_ELEVATION)
     #

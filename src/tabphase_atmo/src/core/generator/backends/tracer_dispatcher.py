@@ -15,6 +15,7 @@ from .geometric.pipelines.pipeline_photon import run_photon_pipeline
 
 class DrJitRaytracerBackend(ScatteringBackend):
     name: str = "drjit_raytracer"
+    supports_vectorization = True
 
     def __init__(self, grid_res: int = 600, num_batches: int = 25, num_phi_bins: int = 1,
                  particle_shape: str = "sphere", sun_elevation_deg: float = 0.0, air_turbulence_factor: float = 1.0):

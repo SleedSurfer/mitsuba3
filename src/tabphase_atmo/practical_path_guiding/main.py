@@ -22,12 +22,19 @@ SCENE_FILE = 'scenes/volumetric-caustic/scene.xml'
 GROUND_TRUTH_FILE = 'scenes/volumetric-caustic/TungstenRender.exr'
 SCENE_NAME = 'volumetric-caustic'
 
-TOTAL_BUDGET_SPP = 10000
+TOTAL_BUDGET_SPP = 40000
 
 # The absolute source of truth for your training phase.
 # It will train for exactly these iterations, then use the remainder for the final render.
 # Starts fat (32) to beat the unguided volumetric tax.
-TRAINING_SCHEDULE = [64, 128, 256, 512, 1024, 1536, 2048]
+TRAINING_SCHEDULE = [64, 64, 128, 256, 512,512,512,512, 1024, 1024]
+
+# Guiding stabilization knobs for sparse volumetric caustics
+GUIDING_START_ITERATION = 2
+GUIDING_RAMP_ITERATIONS = 2
+SDTREE_PDF_PRIOR = 0.1
+TRAINING_RADIANCE_CLAMP = 25000000.0
+TRAINING_LOG_COMPRESSION = False
 
 FINAL_BATCH_SPP = 64  # How many SPP per pass during the final locked-tree render
 RECORD_PERFORMANCE = True
@@ -52,6 +59,9 @@ if __name__ == '__main__':
     FileNameManager.setSceneName(SCENE_NAME)
     FileNameManager.createDebugFolder()
 
+    FileNameManager.setSceneName(SCENE_NAME)
+    FileNameManager.createDebugFolder()
+
     # Integrator Setup
     pathGuidingIntegrator: PathGuidingIntegrator = scene.integrator()
     bbox: mi.ScalarBoundingBox3f = scene.bbox()
@@ -61,10 +71,15 @@ if __name__ == '__main__':
         numRays=(film_size[0] * film_size[1]),
         bbox_min=bbox.min - epsilon,
         bbox_max=bbox.max + epsilon,
-        sdTreeMaxDepth=32,
-        quadTreeMaxDepth=32,
+        sdTreeMaxDepth=5,
+        quadTreeMaxDepth=5,
         isStoreNEERadiance=True,
-        bsdfSamplingFraction=0.5
+        bsdfSamplingFraction=0.5,
+        guidingStartIteration=GUIDING_START_ITERATION,
+        guidingRampIterations=GUIDING_RAMP_ITERATIONS,
+        sdtreePdfPrior=SDTREE_PDF_PRIOR,
+        trainingRadianceClamp=TRAINING_RADIANCE_CLAMP,
+        trainingLogCompression=TRAINING_LOG_COMPRESSION
     )
 
     initial_seed = randint(0, 1000000)
@@ -97,6 +112,14 @@ if __name__ == '__main__':
             if current > budget: break
             targets.append(current)
         return targets
+
+
+    def get_evenly_spaced_targets(total: int, count: int) -> List[int]:
+        if total <= 0 or count <= 0:
+            return []
+        # Use ceil so the checkpoints are guaranteed to move forward and include the tail.
+        step_targets = [math.ceil(total * (i / count)) for i in range(1, count + 1)]
+        return sorted(set(min(total, max(1, t)) for t in step_targets))
 
 
     cumm_spp_targets = get_cumm_targets(TRAINING_SCHEDULE, TOTAL_BUDGET_SPP)
@@ -204,6 +227,9 @@ if __name__ == '__main__':
         num_passes = math.ceil(remaining_spp / FINAL_BATCH_SPP)
         spp_rendered = 0
 
+        phase2_preview_targets = get_evenly_spaced_targets(remaining_spp, 4)
+        phase2_preview_index = 0
+
         pbar = progressbar.ProgressBar(maxval=remaining_spp, widgets=[progressbar.Bar('=', 'Final Render [', ']'), ' ',
                                                                       progressbar.Percentage()])
         pbar.start()
@@ -225,6 +251,20 @@ if __name__ == '__main__':
             spp_rendered += current_batch_spp
 
             pbar.update(spp_rendered)
+
+            # Emit 4 preview checkpoints through the final render budget.
+            while phase2_preview_index < len(phase2_preview_targets) and spp_rendered >= phase2_preview_targets[phase2_preview_index]:
+                preview_spp = phase2_preview_targets[phase2_preview_index]
+                preview_total_spp = cumm_spp + preview_spp
+                current_unweighted = final_iter_image * (float(remaining_spp) / spp_rendered)
+                preview_name = FileNameManager.generateImageFileName(iteration_count, preview_spp)
+                mi.util.write_bitmap(
+                    f"{preview_name}_preview-{phase2_preview_index + 1}_cumm_spp-{preview_total_spp}.exr",
+                    current_unweighted
+                )
+                phase_pct = (preview_spp / float(remaining_spp)) * 100.0
+                print(f"\n[Preview] Saved final-phase preview {phase2_preview_index + 1}/4 at {preview_spp} spp ({phase_pct:.1f}%)")
+                phase2_preview_index += 1
 
             # Check if we crossed a cumulative milestone for saving intermediate EXRs
             current_total_spp = cumm_spp + spp_rendered

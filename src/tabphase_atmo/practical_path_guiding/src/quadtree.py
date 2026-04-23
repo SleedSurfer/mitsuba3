@@ -380,6 +380,9 @@ class QuadTree:
 
 		self.maxDepth = maxDepth
 		self.isStoreNEERadiance = isStoreNEERadiance
+		self.minLeafIrradianceForSplit = 1e-5
+		self.maxSplitPerRefine = 8192
+		self.samplingPrior = 1e-6
 		
 
 	def loadFromFile( self, dataNumpy: np.array ) -> None:
@@ -475,7 +478,7 @@ class QuadTree:
 
 		# We strip the dr.select and woPdf division.
 		# The data from the integrator is already the fully resolved estimator.
-		irradiance = surfaceInteractionRecord.radiance
+		irradiance = surfaceInteractionRecord.radiance / surfaceInteractionRecord.woPdf
 		irradiance = dr.minimum(irradiance, 10000.0)
 
 		addIrradiancePropagate(position, irradiance)
@@ -645,27 +648,21 @@ class QuadTree:
 		# 
 		# 	Split condition
 		# 
-		active = True
-		while active:
-			# Get all leaf node
-			leafNodeIndex = self.getAllLeafNodeIndex( rootIndex )
+		# One split-wave per iteration avoids cascading into early noisy structure.
+		leafNodeIndex = self.getAllLeafNodeIndex( rootIndex )
+		irradiance = dr.gather(mi.Float, self.quadTreeNode.irradiance, leafNodeIndex)
+		refinementThreshold = dr.gather(mi.Float, self.quadTreeNode.refinementThreshold, leafNodeIndex)
+		depth = dr.gather( mi.UInt32, self.quadTreeNode.depth, leafNodeIndex )
+		effectiveThreshold = dr.maximum(refinementThreshold, self.minLeafIrradianceForSplit)
+		condition = ( irradiance > effectiveThreshold ) & ( depth < self.maxDepth )
 
-			# If leaf node irradiance is more threshold and less than maximum depth then split
-			irradiance = dr.gather(mi.Float, self.quadTreeNode.irradiance, leafNodeIndex)
-			refinementThreshold = dr.gather(mi.Float, self.quadTreeNode.refinementThreshold, leafNodeIndex)
-			depth = dr.gather( mi.UInt32, self.quadTreeNode.depth, leafNodeIndex )
-			condition = ( irradiance > refinementThreshold ) & ( depth < self.maxDepth )
-
-			# If there is at least one node to split. This is to avoid dr.gather() with active are all false 
-			# which will result return in array size = src size
-			active = dr.any( condition )
-			if active:
-
-				# Get list of leaf node that need refine
-				splitNodeIndex = dr.gather( mi.UInt32, leafNodeIndex, dr.compress( condition ) )
-
-				# Split 
-				self.quadTreeNode.split( splitNodeIndex )
+		if dr.any(condition):
+			splitNodeIndex = dr.gather( mi.UInt32, leafNodeIndex, dr.compress( condition ) )
+			nSplit = dr.width(splitNodeIndex)
+			if nSplit > self.maxSplitPerRefine:
+				splitNodeIndex = dr.gather(mi.UInt32, splitNodeIndex,
+				                          dr.arange(mi.UInt32, self.maxSplitPerRefine))
+			self.quadTreeNode.split( splitNodeIndex )
 
 	
 	def resetTreeIrradiance(self, rootIndex: mi.UInt32) -> None:
@@ -877,6 +874,9 @@ class QuadTree:
 		# Copy self properties
 		self.maxDepth = quadTree.maxDepth
 		self.isStoreNEERadiance = quadTree.isStoreNEERadiance
+		self.minLeafIrradianceForSplit = quadTree.minLeafIrradianceForSplit
+		self.maxSplitPerRefine = quadTree.maxSplitPerRefine
+		self.samplingPrior = quadTree.samplingPrior
 
 	
 	def clearTreeUnusedNode(self) -> None:
@@ -1018,15 +1018,19 @@ class QuadTree:
 			child_3_irradiance = dr.gather(mi.Float, self.quadTreeNode.irradiance, child_3_index, active_sample)
 			child_4_irradiance = dr.gather(mi.Float, self.quadTreeNode.irradiance, child_4_index, active_sample)
 
-			# Construct a CDF
+			# Construct a CDF with a tiny prior to avoid zero-mass lock-in.
+			child_1_irradiance += self.samplingPrior
+			child_2_irradiance += self.samplingPrior
+			child_3_irradiance += self.samplingPrior
+			child_4_irradiance += self.samplingPrior
 			child_2_irradiance += child_1_irradiance
 			child_3_irradiance += child_2_irradiance
 			child_4_irradiance += child_3_irradiance
 
 
 
-			# Sampling a range
-			sample_irradiance = sampler.next_1d() * child_4_irradiance
+			u = sampler.next_1d(active_sample)
+			sample_irradiance = u * child_4_irradiance
 
 			# Check which bin it falls into
 			sample_child_1_active = sample_irradiance < child_1_irradiance
@@ -1131,7 +1135,9 @@ class QuadTree:
 												  )
 										)
 
-			#  Compute PDF of the current iteration
+			#  Compute PDF of the current iteration with a small prior for stability.
+			childIrradiance += self.samplingPrior
+			nodeIrradiance += 4.0 * self.samplingPrior
 			pdf[active_pdf] *= 4 * childIrradiance / nodeIrradiance
 
 			#  If encounter nan this means that both childIrradiance and nodeIrradiance are 0.

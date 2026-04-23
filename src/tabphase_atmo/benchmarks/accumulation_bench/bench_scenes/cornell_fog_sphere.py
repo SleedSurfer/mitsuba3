@@ -6,13 +6,17 @@ MESH_DIR = "/home/speedlord/mitsuba3/src/tabphase_atmo/assets/meshes"
 
 
 def get_scene(config, phase=None, sun_elevation_deg=20.0):
-    phase = create_atmospheric_phase(phase, (0, 1, 0))
+    phase = create_atmospheric_phase(phase, (0, 1, 0),force_regen=False)
+
+    base_sigma_t = 19.0
+    base_albedo = 0.9
+
     return {
         "type": "scene",
 
         "integrator": {
             "type": "volpath",
-            "max_depth": -1  # Still a thermal hazard, but you do you
+            "max_depth": 32  # Still a thermal hazard, but you do you
         },
 
         "sensor": {
@@ -37,7 +41,7 @@ def get_scene(config, phase=None, sun_elevation_deg=20.0):
                 "height": config.get('res_h', 256),
                 "pixel_format": "rgb",
                 "component_format": "float32",
-                "rfilter": {"type": "tent"}
+                "rfilter": {"type": "box"}
             }
         },
 
@@ -60,34 +64,34 @@ def get_scene(config, phase=None, sun_elevation_deg=20.0):
             }
         },
 
-        "frontlight": {
-            "type": "spot",
-            # Pushed back slightly to Z=1.5 so the tight cone has room to travel
-            # Still aiming exactly at the top half of the sphere
-            "to_world": mi.ScalarTransform4f.look_at(
-                origin=[-0.3, -0.25, 1.5],
-                target=[-0.3, -0.5, 0.2],
-                up=[0, 1, 0]
-            ),
-            # Spotlights use radiant intensity (W/sr) instead of radiance.
-            # Because we are choking the beam angle so hard, it needs massive juice.
-            "intensity": {"type": "rgb", "value": [8.0, 8.0, 8.0]},
-            "cutoff_angle": 22.0,  # The hard boundary of the beam
-            "beam_width": 7.0  # The inner core where the light starts fading out
-        },
+        # "frontlight": {
+        #     "type": "spot",
+        #     # Pushed back slightly to Z=1.5 so the tight cone has room to travel
+        #     # Still aiming exactly at the top half of the sphere
+        #     "to_world": mi.ScalarTransform4f.look_at(
+        #         origin=[-0.3, -0.25, 1.5],
+        #         target=[-0.3, -0.5, 0.2],
+        #         up=[0, 1, 0]
+        #     ),
+        #     # Spotlights use radiant intensity (W/sr) instead of radiance.
+        #     # Because we are choking the beam angle so hard, it needs massive juice.
+        #     "intensity": {"type": "rgb", "value": [2.0, 2.0, 2.0]},
+        #     "cutoff_angle": 16.0,  # The hard boundary of the beam
+        #     "beam_width": 11.0  # The inner core where the light starts fading out
+        # },
 
         # --- The Silver Lining / Rim Emitter ---
-        "rimlight": {
-            "type": "spot",
-            "to_world": mi.ScalarTransform4f.look_at(
-                origin=[-0.3, -0.5, -0.7],  # EXACTLY behind the sphere center
-                target=[-0.3, -0.5, 0.2],   # Aiming exactly forward at the center
-                up=[0, 1, 0]
-            ),
-            "intensity": {"type": "rgb", "value": [15.0, 15.0, 23.0]},
-            "cutoff_angle": 45.0,
-            "beam_width": 30.0
-        },
+        # "rimlight": {
+        #     "type": "spot",
+        #     "to_world": mi.ScalarTransform4f.look_at(
+        #         origin=[-0.3, -0.5, -0.7],  # EXACTLY behind the sphere center
+        #         target=[-0.3, -0.5, 0.2],   # Aiming exactly forward at the center
+        #         up=[0, 1, 0]
+        #     ),
+        #     "intensity": {"type": "rgb", "value": [2.0, 2.0, 3.0]},
+        #     "cutoff_angle": 34.0,
+        #     "beam_width": 32.0
+        # },
         # "diskfrontlight": {
         #     "type": "disk",
         #     # Z=0.9 puts it in front of the sphere (which extends to Z=0.7).
@@ -132,16 +136,16 @@ def get_scene(config, phase=None, sun_elevation_deg=20.0):
             "bsdf": {"type": "ref", "id": "red"}
         },
 
-        # --- Primitives ---
+        #--- Primitives ---
         "fogsphere": {
             "type": "sphere",
             "to_world": mi.ScalarTransform4f.translate([-0.3, -0.5, 0.2]).scale([0.5, 0.5, 0.5]),
             "bsdf": {"type": "null"},
             "interior": {
                 "type": "homogeneous",
-                "sigma_t": 16.0,
-                "albedo": 0.9,
-                "phase": phase#{"type": "hg", "g": 0.5}
+                "sigma_t": base_sigma_t,
+                "albedo": base_albedo,
+                "phase": phase#{"type": "hg", "g": 0.95}
             }
         },
         "glasssphere": {

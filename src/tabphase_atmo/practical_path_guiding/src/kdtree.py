@@ -132,6 +132,8 @@ class KDTree:
 
 		self.maxLeafSize = max_leaf_size
 		self.maxDepth = maxDepth
+		self.minLeafCountForSplit = 16.0
+		self.maxSplitPerRefine = 4096
 
 		# Init QuadTree
 		self.quadTree = QuadTree()
@@ -155,6 +157,8 @@ class KDTree:
 		# Copy self properties
 		self.maxLeafSize = kdtree.maxLeafSize
 		self.maxDepth = kdtree.maxDepth
+		self.minLeafCountForSplit = kdtree.minLeafCountForSplit
+		self.maxSplitPerRefine = kdtree.maxSplitPerRefine
 
 		# Copy QuadTree
 		self.quadTree.copyFrom( kdtree.quadTree )
@@ -361,7 +365,7 @@ class KDTree:
 	
 	def setRefinementThreshold(self, iteration: int) -> None:
 		# This constant is from the paper
-		c = 500
+		c = 1500
 		self.maxLeafSize = c * math.sqrt( math.pow(2, iteration) )
 
 	
@@ -369,28 +373,22 @@ class KDTree:
 		""" Refine the tree until conditions are met.
 			1. Split if the node's flux is more than the threshold and depth is less than the max depth.
 		"""
-		# 
-		# 	Split condition
-		# 
-		active = True
-		while active:
-			# Get all leaf node
-			leafNodeIndex = self.getAllLeafNodeIndex()
+		# One split-wave per iteration avoids runaway spatial over-refinement.
+		leafNodeIndex = self.getAllLeafNodeIndex()
 
-			# If leaf node vertCount is more than threshold then split
-			vertCount = dr.gather( mi.Float, self.kdTreeNode.vertCount, leafNodeIndex )
-			depth = dr.gather( mi.UInt32, self.kdTreeNode.depth, leafNodeIndex )
-			condition = ( vertCount > self.maxLeafSize ) & ( depth < self.maxDepth )
+		# If leaf node vertCount is more than threshold then split
+		vertCount = dr.gather( mi.Float, self.kdTreeNode.vertCount, leafNodeIndex )
+		depth = dr.gather( mi.UInt32, self.kdTreeNode.depth, leafNodeIndex )
+		effectiveLeafSize = dr.maximum(mi.Float(self.maxLeafSize), mi.Float(self.minLeafCountForSplit))
+		condition = ( vertCount > effectiveLeafSize ) & ( depth < self.maxDepth )
 
-			# If there is atleast one node to split, then split and continue the loop.
-			active = dr.any( condition )
-			if active:
-
-				# Get list of leaf node that need to split
-				splitNodeIndex = dr.gather( mi.UInt32, leafNodeIndex, dr.compress(condition) )
-
-				# Split
-				self.split( splitNodeIndex )
+		if dr.any(condition):
+			splitNodeIndex = dr.gather( mi.UInt32, leafNodeIndex, dr.compress(condition) )
+			nSplit = dr.width(splitNodeIndex)
+			if nSplit > self.maxSplitPerRefine:
+				splitNodeIndex = dr.gather(mi.UInt32, splitNodeIndex,
+				                          dr.arange(mi.UInt32, self.maxSplitPerRefine))
+			self.split( splitNodeIndex )
 
 
 	def validateTreeNodeBBox(self) -> bool:
