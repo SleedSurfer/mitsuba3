@@ -390,8 +390,12 @@ class PathGuidingIntegrator(mi.SamplingIntegrator):
 
             # --- PHASE 4: SURFACE ---
             active_surface = (active & ~active_medium) | escaped_medium
-            total_dist = dr.select(active_surface, total_dist + si.t, total_dist)
             valid_surface = active_surface & si.is_valid()
+
+            # FIX: Only add si.t if the surface is valid. If invalid (clear path to light),
+            # force total_dist to max_dist to cleanly terminate the loop.
+            total_dist = dr.select(valid_surface, total_dist + si.t,
+                                   dr.select(active_surface & ~valid_surface, max_dist, total_dist))
 
             bsdf_shadow = si.bsdf(ray)
             null_trans = bsdf_shadow.eval_null_transmission(si, valid_surface)
@@ -591,7 +595,7 @@ class PathGuidingIntegrator(mi.SamplingIntegrator):
                                       dr.select(si.is_medium_transition(), si.target_medium(shadow_ray.d), medium))
 
             # Run the gauntlet
-            Tr = self.evaluate_nee_transmittance(scene, sampler, shadow_ray, shadow_medium, channel, active_em, ds.dist)
+            Tr = self.evaluate_nee_transmittance(scene, sampler, shadow_ray, shadow_medium, channel, active_em, shadow_ray.maxt)
 
             em_weight *= Tr
             active_em &= (dr.max(Tr) > 0.0)
