@@ -85,6 +85,24 @@ class PathGuidingIntegrator(mi.SamplingIntegrator):
         self.sumL = mi.Spectrum(0)
         self.sumL2 = mi.Spectrum(0)
 
+        # Dummy medium with zero extinction (acts like vacuum)
+        self._null_medium = mi.load_dict({
+            "type": "homogeneous",
+            "sigma_t": 0.0,
+            "albedo": 0.0
+        })
+
+        # Dummy shape/bsdf for safe bsdf() calls
+        self._null_shape = mi.load_dict({
+            "type": "sphere",
+            "radius": 0.0,
+            "bsdf": {"type": "null"}
+        })
+
+        # A dummy surface interaction tied to the null shape
+        null_ray = mi.Ray3f(o=[0, 0, 0], d=[1, 0, 0])
+        self._null_si = self._null_shape.ray_intersect(null_ray, True)
+
 
     def setup( self: mi.SamplingIntegrator,
         numRays: int,
@@ -203,53 +221,199 @@ class PathGuidingIntegrator(mi.SamplingIntegrator):
     def _eval_shadow_transmittance(self, scene: mi.Scene, sampler: mi.Sampler, shadow_ray: mi.Ray3f, shadow_medium,
                                    channel: mi.UInt32, active: mi.Bool) -> mi.Spectrum:
         ray = mi.Ray3f(shadow_ray)
+        max_dist = ray.maxt
         transmittance = dr.full(mi.Spectrum, 1.0, dr.width(ray))
-        active = mi.Bool(active)
+        total_dist = dr.zeros(mi.Float, dr.width(ray))
+        needs_intersection = mi.Bool(True)
+        si = dr.zeros(mi.SurfaceInteraction3f, dr.width(ray))
         medium = shadow_medium
 
-        loop_state = (active, ray, transmittance, medium)
+        loop_state = (active, ray, total_dist, needs_intersection, si, transmittance, medium, sampler)
 
-        def cond(active, ray, transmittance, medium):
-            return active
+        def cond(active, ray, total_dist, needs_intersection, si, transmittance, medium, sampler):
+            return dr.detach(active)
 
-        def body(active, ray, transmittance, medium):
-            si = scene.ray_intersect(ray, active=active)
+        def body(active, ray, total_dist, needs_intersection, si, transmittance, medium, sampler):
+            remaining_dist = max_dist - total_dist
+            ray.maxt = remaining_dist
+            active &= remaining_dist > 0.0
 
-            # 1. Evaluate Beer's Law strictly up to the surface hit (or light source)
             active_medium = active & (medium != None)
-            dist = dr.select(si.is_valid(), si.t, ray.maxt)
+            active_surface = active & ~active_medium
 
-            mei = dr.zeros(mi.MediumInteraction3f, dr.width(ray))
-            mei.mint = 0.0
-            mei.t = dist
-            tr, _ = medium.transmittance_eval_pdf(mei, si, active_medium)
+            # --- 1. THE VOLUMETRIC RATIO TRACKER (C++ PORT) ---
+            mei = medium.sample_interaction(ray, sampler.next_1d(active_medium), channel, active_medium)
 
-            transmittance = dr.select(active_medium, transmittance * tr, transmittance)
+            ray.maxt = dr.select(active_medium & medium.is_homogeneous() & mei.is_valid(),
+                                 dr.minimum(mei.t, remaining_dist), ray.maxt)
 
-            # 2. If it didn't hit a surface, we successfully reached the light! Loop terminates.
-            active &= si.is_valid()
+            intersect = needs_intersection & active_medium
+            si = dr.select(intersect, scene.ray_intersect(ray, active=intersect), si)
+            needs_intersection &= ~active_medium
 
-            # 3. If we hit a surface, check if it's a transparent boundary (null BSDF)
-            bsdf = si.bsdf(ray)
-            null_trans = bsdf.eval_null_transmission(si, active)
+            mei.t = dr.select(active_medium & (si.t < mei.t), dr.inf, mei.t)
+
+            is_spectral = active_medium & medium.has_spectral_extinction()
+            not_spectral = active_medium & ~is_spectral
+
+            t_cap = dr.minimum(remaining_dist, dr.minimum(mei.t, si.t)) - mei.mint
+            tr_eval = dr.exp(-t_cap * mei.combined_extinction)
+
+            free_flight_pdf = dr.select((si.t < mei.t) | (mei.t > remaining_dist), tr_eval,
+                                        tr_eval * mei.combined_extinction)
+
+            tr_pdf = dr.select(channel == 0, free_flight_pdf[0],
+                               dr.select(channel == 1, free_flight_pdf[1],
+                                         dr.select(channel == 2, free_flight_pdf[2], free_flight_pdf[3])))
+
+            tr_weight = dr.select(tr_pdf > 0.0, tr_eval / tr_pdf, 0.0)
+            transmittance = dr.select(is_spectral, transmittance * tr_weight, transmittance)
+
+            passed_light = active_medium & (mei.t > remaining_dist)
+            total_dist = dr.select(passed_light & mei.is_valid(), max_dist, total_dist)
+            mei.t = dr.select(passed_light, dr.inf, mei.t)
+
+            escaped_medium = active_medium & ~mei.is_valid()
+            active_medium &= mei.is_valid()
+            is_spectral &= active_medium
+            not_spectral &= active_medium
+
+            total_dist = dr.select(active_medium, total_dist + mei.t, total_dist)
+
+            ray.o = dr.select(active_medium, mei.p, ray.o)
+            si.t = dr.select(active_medium, si.t - mei.t, si.t)
+
+            transmittance = dr.select(is_spectral, transmittance * mi.Spectrum(mei.sigma_n), transmittance)
+            transmittance = dr.select(not_spectral, transmittance * (mei.sigma_n / mei.combined_extinction),
+                                      transmittance)
+
+            # --- 2. THE SURFACE WALKER ---
+            intersect = active_surface & needs_intersection
+            si = dr.select(intersect, scene.ray_intersect(ray, active=intersect), si)
+            needs_intersection &= ~intersect
+
+            active_surface |= escaped_medium
+            total_dist = dr.select(active_surface, total_dist + si.t, total_dist)
+
+            active_surface &= si.is_valid() & active & ~active_medium
+
+            bsdf_shadow = si.bsdf(ray)
+            null_trans = bsdf_shadow.eval_null_transmission(si, active_surface)
             null_trans = si.to_world_mueller(null_trans, si.wi, si.wi)
-            transmittance = dr.select(active, transmittance * null_trans, transmittance)
+            transmittance = dr.select(active_surface, transmittance * null_trans, transmittance)
 
-            # 4. Kill lanes that hit solid opaque walls
-            active &= dr.max(transmittance) > 0.0
+            ray = dr.select(active_surface, si.spawn_ray(ray.d), ray)
+            ray.maxt = remaining_dist
+            needs_intersection |= active_surface
 
-            # 5. Step through the null boundary
-            ray_new = si.spawn_ray(ray.d)
-            ray.o = ray_new.o
-            ray.maxt = ray.maxt - si.t
+            trans_max = dr.max(transmittance)
+            active &= (active_medium | active_surface) & (trans_max > 0.0)
 
-            has_medium_trans = active & si.is_medium_transition()
+            has_medium_trans = active_surface & si.is_medium_transition()
             medium = dr.select(has_medium_trans, si.target_medium(ray.d), medium)
 
-            return (active, ray, transmittance, medium)
+            return (active, ray, total_dist, needs_intersection, si, transmittance, medium, sampler)
 
-        active, ray, transmittance, medium = dr.while_loop(
-            state=loop_state, cond=cond, body=body, max_iterations=self.max_depth
+        active, ray, total_dist, needs_intersection, si, transmittance, medium, sampler = dr.while_loop(
+            state=loop_state, cond=cond, body=body, max_iterations=self.max_depth * 2
+        )
+
+        return transmittance
+
+    def evaluate_nee_transmittance(self, scene: mi.Scene, sampler: mi.Sampler, ray_in: mi.Ray3f,
+                                   medium_in: mi.Medium, channel: mi.UInt32,
+                                   active_in: mi.Bool, max_dist: mi.Float) -> mi.Spectrum:
+
+        active = mi.Bool(active_in)
+        ray = mi.Ray3f(ray_in)
+        total_dist = dr.zeros(mi.Float, dr.width(active))
+
+        # Lane-wise "has medium" mask
+        has_medium = (medium_in != None)
+        medium = dr.select(has_medium, medium_in, self._null_medium)
+
+        transmittance = dr.full(mi.Spectrum, 1.0, dr.width(active))
+
+        # 1. ADD `sampler` TO LOOP STATE
+        # 2. REMOVE `si` FROM LOOP STATE
+        loop_state = (sampler, active, ray, total_dist, medium, transmittance)
+
+        def loop_cond(sampler, active, ray, total_dist, medium, transmittance):
+            # dr.detach is unnecessary here for a boolean mask
+            return active
+
+        def loop_body(sampler, active, ray, total_dist, medium, transmittance):
+            remaining_dist = max_dist - total_dist
+            ray.maxt = remaining_dist
+            active &= (remaining_dist > 0.0)
+
+            active_medium = active & (medium != None)
+
+            # --- PHASE 1: MEDIUM ---
+            mei = medium.sample_interaction(ray, sampler.next_1d(active_medium), channel, active_medium)
+
+            ray.maxt = dr.select(active_medium & medium.is_homogeneous() & mei.is_valid(),
+                                 dr.minimum(mei.t, remaining_dist), ray.maxt)
+
+            # --- PHASE 2: GEOMETRY ---
+            # 3. LOCALLY INSTANTIATE `si` (No dr.select multiplexing needed)
+            si = scene.ray_intersect(ray, active)
+
+            mei.t = dr.select(active_medium & (si.t < mei.t), dr.inf, mei.t)
+
+            # --- PHASE 3: ATTENUATION ---
+            t_cap = dr.minimum(remaining_dist, dr.minimum(mei.t, si.t)) - mei.mint
+            tr_eval = dr.exp(-t_cap * mei.combined_extinction)
+            tr_eval = dr.select(dr.isfinite(tr_eval), tr_eval, 0.0)
+
+            is_spectral = active_medium & medium.has_spectral_extinction()
+
+            free_flight_pdf = dr.select((si.t < mei.t) | (mei.t > remaining_dist),
+                                        tr_eval, tr_eval * mei.combined_extinction)
+            tr_pdf = self._index_spectrum(free_flight_pdf, channel)
+            tr_weight = dr.select(tr_pdf > 0.0, tr_eval / tr_pdf, 0.0)
+            transmittance = dr.select(is_spectral, transmittance * tr_weight, transmittance)
+
+            passed_light = active_medium & (mei.t > remaining_dist)
+            total_dist = dr.select(passed_light & mei.is_valid(), max_dist, total_dist)
+            mei.t = dr.select(passed_light, dr.inf, mei.t)
+
+            escaped_medium = active_medium & ~mei.is_valid()
+            active_medium &= mei.is_valid()
+
+            total_dist = dr.select(active_medium, total_dist + mei.t, total_dist)
+
+            transmittance = dr.select(active_medium & is_spectral, transmittance * mei.sigma_n, transmittance)
+            safe_ext = dr.maximum(mei.combined_extinction, 1e-8)
+            transmittance = dr.select(active_medium & ~is_spectral,
+                                      transmittance * (mei.sigma_n / safe_ext), transmittance)
+
+            # --- PHASE 4: SURFACE ---
+            active_surface = (active & ~active_medium) | escaped_medium
+            total_dist = dr.select(active_surface, total_dist + si.t, total_dist)
+            valid_surface = active_surface & si.is_valid()
+
+            bsdf_shadow = si.bsdf(ray)
+            null_trans = bsdf_shadow.eval_null_transmission(si, valid_surface)
+            transmittance = dr.select(valid_surface, transmittance * null_trans, transmittance)
+
+            # --- PHASE 5: UPDATE ---
+            has_medium_trans = valid_surface & si.is_medium_transition()
+            medium = dr.select(has_medium_trans, si.target_medium(ray.d), medium)
+
+            ray_spawned = si.spawn_ray(ray.d)
+            ray.o = dr.select(active_medium, mei.p, dr.select(valid_surface, ray_spawned.o, ray.o))
+            ray.maxt = remaining_dist
+
+            active &= (active_medium | valid_surface) & (dr.max(transmittance) > 1e-6)
+            transmittance = mi.Spectrum(transmittance)
+
+            return (sampler, active, ray, total_dist, medium, transmittance)
+
+        sampler, active, ray, total_dist, medium, transmittance = dr.while_loop(
+            state=loop_state,
+            cond=loop_cond,
+            body=loop_body
         )
 
         return transmittance
@@ -390,13 +554,12 @@ class PathGuidingIntegrator(mi.SamplingIntegrator):
             phase_ctx = mi.PhaseFunctionContext(sampler)
             bsdf_ctx = mi.BSDFContext()
 
-            # 1. Unified Position for the Spotter
             eval_p = dr.select(act_medium_scatter, mei.p, si.p)
 
-            # 2. Direct Emission (Only surfaces emit light directly when hit)
+            # 2. Direct Emission (Original graveyard logic)
             ds_direct = mi.DirectionSample3f(scene, si=si, ref=prev_si)
             emitter_pdf = scene.pdf_emitter_direction(prev_si, ds_direct, ~prev_bsdf_delta)
-            mis = mis_weight(prev_bsdf_pdf, emitter_pdf)
+            mis = dr.select(prev_bsdf_delta, 1.0, mis_weight(prev_bsdf_pdf, emitter_pdf))
             em_radiance = ds_direct.emitter.eval(si)
             Le = dr.select(active_surface, throughput_weight * mis * em_radiance, mi.Spectrum(0.0))
 
@@ -405,11 +568,11 @@ class PathGuidingIntegrator(mi.SamplingIntegrator):
             # -------------------------------------------------------------------------
             active_next = (depth + 1 < self.max_depth) & (si.is_valid() | act_medium_scatter)
 
-            # Restored your original working flags!
+            # Original working graveyard flags
             active_em_surface = active_next & active_surface & mi.has_flag(bsdf.flags(), mi.BSDFFlags.Smooth)
             active_em_medium = active_next & act_medium_scatter
 
-            # Set test_visibility=False so we can manually walk the fog
+            # Set test_visibility=False to manual walk the fog
             ds_surface, em_weight_surface = scene.sample_emitter_direction(si, sampler.next_2d(), test_visibility=False,
                                                                            active=active_em_surface)
             ds_medium, em_weight_medium = scene.sample_emitter_direction(mei, sampler.next_2d(), test_visibility=False,
@@ -420,24 +583,19 @@ class PathGuidingIntegrator(mi.SamplingIntegrator):
 
             active_em = (active_em_surface | active_em_medium) & (ds.pdf > 0.0)
 
-            # Safely spawn the shadow ray
+            # Setup the shadow ray exactly toward the light source
             shadow_ray = dr.select(act_medium_scatter, mei.spawn_ray_to(ds.p), si.spawn_ray_to(ds.p))
 
-            # The Magic Fix: forcefully shrink the ray length by a fraction of a percent
-            # so it mathematically CANNOT clip the physical emitter geometry and return 0.0
-            shadow_ray.maxt = shadow_ray.maxt * 0.9999
-
+            # Establish the starting medium for the shadow ray
             shadow_medium = dr.select(act_medium_scatter, medium,
                                       dr.select(si.is_medium_transition(), si.target_medium(shadow_ray.d), medium))
 
-            Tr = self._eval_shadow_transmittance(
-                scene=scene,
-                sampler=sampler,
-                shadow_ray=shadow_ray,
-                shadow_medium=shadow_medium,
-                channel=channel,
-                active=active_em
-            )
+            # Run the gauntlet
+            Tr = self.evaluate_nee_transmittance(scene, sampler, shadow_ray, shadow_medium, channel, active_em, ds.dist)
+
+            em_weight *= Tr
+            active_em &= (dr.max(Tr) > 0.0)
+
 
             em_weight *= Tr
             active_em &= (dr.max(Tr) > 0.0)
@@ -446,29 +604,22 @@ class PathGuidingIntegrator(mi.SamplingIntegrator):
             wo_local_surface = si.to_local(ds.d)
             bsdf_value_em, bsdf_pdf_em = bsdf.eval_pdf(bsdf_ctx, si, wo_local_surface, active_em & active_surface)
 
-            # Evaluate Phase Function
+            # Evaluate Phase Function (using world space ds.d natively)
             if phase is not None:
-                wo_local_medium = mei.to_local(ds.d)
-                phase_value_em, phase_pdf_em = phase.eval_pdf(phase_ctx, mei, wo_local_medium,
-                                                              active_em & act_medium_scatter)
+                phase_value_em, phase_pdf_em = phase.eval_pdf(phase_ctx, mei, ds.d, active_em & act_medium_scatter)
             else:
                 phase_value_em, phase_pdf_em = mi.Spectrum(0), mi.Float(0)
 
-            # Unify the Evaluation
             scatter_value_em = dr.select(act_medium_scatter, phase_value_em, bsdf_value_em)
             scatter_pdf_em = dr.select(act_medium_scatter, phase_pdf_em, bsdf_pdf_em)
 
             active_sdtree_and_em = active_em & (self.iteration > 1)
-
-            # SD-Tree Guiding PDF for NEE
             sdtree_pdf_em = self.sdTree_prev.pdf(eval_p, ds.d, active_sdtree_and_em)
 
-            # MIS PDF: 50% Tree, 50% Material/Phase
             surface_pdf_em = self.bsdfSamplingFraction * scatter_pdf_em + (
                         1 - self.bsdfSamplingFraction) * sdtree_pdf_em
             surface_pdf_em = dr.select((self.iteration <= 1), scatter_pdf_em, surface_pdf_em)
 
-            # MIS Weight & NEE Accumulation
             mis_em = dr.select(ds.delta, 1.0, mis_weight(ds.pdf, surface_pdf_em))
             Lr_dir = throughput_weight * mis_em * scatter_value_em * em_weight
 
@@ -477,26 +628,22 @@ class PathGuidingIntegrator(mi.SamplingIntegrator):
             # -------------------------------------------------------------------------
             # Next Outgoing Ray Sampling (The Spotter MIS)
             # -------------------------------------------------------------------------
-            # Sample BSDF natively
             bsdf_sample, bsdf_weight = bsdf.sample(bsdf_ctx, si, sampler.next_1d(active_surface),
                                                    sampler.next_2d(active_surface), active_surface)
 
-            # Sample Phase Function natively
             if phase is not None:
-                phase_wo_local, phase_weight, phase_pdf = phase.sample(phase_ctx, mei,
+                phase_wo_world, phase_weight, phase_pdf = phase.sample(phase_ctx, mei,
                                                                        sampler.next_1d(act_medium_scatter),
                                                                        sampler.next_2d(act_medium_scatter),
                                                                        act_medium_scatter)
-                phase_wo_world = mei.to_world(phase_wo_local)
             else:
                 phase_wo_world, phase_weight, phase_pdf = mi.Vector3f(0), mi.Spectrum(0), mi.Float(0)
 
-            # Unify Initial Samples
             wo_world = dr.select(act_medium_scatter, phase_wo_world, si.to_world(bsdf_sample.wo))
             scatter_weight_sampled = dr.select(act_medium_scatter, phase_weight, bsdf_weight)
             scatter_pdf_sampled = dr.select(act_medium_scatter, phase_pdf, bsdf_sample.pdf)
 
-            # Restored your original working Delta flag!
+            # Original graveyard delta flag
             delta = active_surface & mi.has_flag(bsdf_sample.sampled_type, mi.BSDFFlags.Delta)
 
             do_sdtree_mis = active_next & ~delta & self.guidingActive
@@ -607,35 +754,29 @@ class PathGuidingIntegrator(mi.SamplingIntegrator):
             #     Update loop variables based on current interaction
             #
             active_surface_si = active_surface & si.is_valid()
-            # Safely spawn rays depending on if we hit a surface or fog
+            # =========================================================================
+            # Update loop variables based on current interaction
+            # =========================================================================
+
             ray_surface = si.spawn_ray(wo_world)
             ray_medium = mei.spawn_ray(wo_world)
 
-            scatter_event = act_medium_scatter | active_surface_si
-            new_ray_o = dr.select(act_medium_scatter, ray_medium.o, ray_surface.o)
+            # A real bounce happened (either off the wall, or a real fog particle)
+            scatter_event = act_medium_scatter | active_surface
 
-            # Only update the ray direction if a real scatter or a valid surface hit occurred.
-            # Null scatters just keep flying straight.
-            ray.d = dr.select(scatter_event & ~act_null_scatter, wo_world, ray.d)
-            # ray.o was already bumped forward in the null scatter block above, so we only
-            # overwrite it for real scatters or surface interactions.
-            ray.o = dr.select(scatter_event & ~act_null_scatter, new_ray_o, ray.o)
+            # If it's a real bounce, take the new origin and direction.
+            # If it's a null scatter, leave the ray alone (it was already bumped forward in Phase 2).
+            ray.o = dr.select(scatter_event, dr.select(act_medium_scatter, ray_medium.o, ray_surface.o), ray.o)
+            ray.d = dr.select(scatter_event, wo_world, ray.d)
 
             # Only grab surface IOR if we actually hit a surface
-            ior *= dr.select(active_surface_si, bsdf_sample.eta, 1.0)
+            ior *= dr.select(active_surface, bsdf_sample.eta, 1.0)
 
             # Null scatters just move forward, they don't lose energy to the BSDF
-            throughput_weight *= dr.select(
-                act_null_scatter,
-                1.0,
-                dr.select(scatter_event, bsdf_weight, 1.0)
-            )
+            throughput_weight *= dr.select(scatter_event, bsdf_weight, 1.0)
 
-            # =========================================================================
             # BOUNDARY TRACKING FIX
-            # If the ray transmits through a boundary (like glass), update the medium!
-            # =========================================================================
-            has_medium_trans = active_surface_si & si.is_medium_transition()
+            has_medium_trans = active_surface & si.is_medium_transition()
             medium = dr.select(has_medium_trans, si.target_medium(ray.d), medium)
 
             prev_si = si
