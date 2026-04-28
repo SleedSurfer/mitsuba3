@@ -80,7 +80,7 @@ def _run_photon_pass(particle, collector, num_chunks, chunk_size, radius_mm,
 
 def run_photon_pipeline(particle, collector, theta_internal, theta_requested, ior_real_dr, ior_inv_dr, num_phi_bins):
     radius_mm = particle.R
-    chunk_size = 5_000_000
+    chunk_size = 8_000_000
     num_chunks = 20
 
     # Pass 1 & 2

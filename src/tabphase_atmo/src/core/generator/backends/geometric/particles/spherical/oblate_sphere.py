@@ -8,7 +8,7 @@ from ..base_particle import SphericalParticle
 
 
 class OblateSpheroidParticle(SphericalParticle):
-    def __init__(self, radius_mm: float, aspect_ratio: float = 0.97):
+    def __init__(self, radius_mm: float, aspect_ratio: float = 0.98):
         self.radius = Float(radius_mm)
         self.ar = Float(aspect_ratio)
         # Precompute the squared aspect ratio for normal scaling

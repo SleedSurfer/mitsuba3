@@ -66,8 +66,7 @@ def get_scene(config,phase):
         "type": "scene",
         "integrator": {
             "type": "volpath",
-            "max_depth": -1,
-            "rr_depth": 100
+            "max_depth": 2
         },
         "sensor": {
             "type": "perspective",

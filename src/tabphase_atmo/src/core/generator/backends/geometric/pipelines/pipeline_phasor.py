@@ -150,7 +150,7 @@ def run_phasor_pipeline(config, particle, collector, theta_internal, theta_reque
     The orchestrator for Path A (Wavefronts).
     """
     radius_mm = particle.radius
-    grid_width_mm = radius_mm * 2.2
+    grid_width_mm = radius_mm * 2.2 #TODO magic number ?
     patch_area = (grid_width_mm / config.grid_res) ** 2
     step_size = grid_width_mm / (config.grid_res - 1) if config.grid_res > 1 else 0.0
 
