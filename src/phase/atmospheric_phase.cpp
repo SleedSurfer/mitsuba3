@@ -23,8 +23,8 @@ public:
     AtmosphericPhaseFunction(const Properties &props) : Base(props) {
         m_filename = props.get<std::string>("filename");
 
-        // Critical for Anisotropy: We must know which way gravity is pointing
         m_up = dr::normalize(props.get<Vector3f>("up", Vector3f(0.f, 1.f, 0.f)));
+        m_fscatter_elimit = props.get<float>("forward_scatter_limit", 1.0f);
 
         auto fs = Thread::thread()->file_resolver();
         fs::path file_path = fs->resolve(m_filename);
@@ -88,7 +88,8 @@ public:
                     }
                     cond_cdf_host[cond_offset + m_phi_bins - 1] = 1.f;
                 } else {
-                    integral_phi = host_data[t * m_num_channels + c] * 2.0 * dr::Pi<double>;
+                    double raw_val = host_data[t * m_num_channels + c];
+                    integral_phi = raw_val * 2.0 * dr::Pi<double>;
                     cond_cdf_host[cond_offset + 0] = 1.f;
                 }
                 phi_integrals[t] = integral_phi;
@@ -149,19 +150,23 @@ public:
         Float phi = dr::atan2(wo_t, wo_s);
         phi = dr::select(phi < 0.f, phi + 2.f * dr::Pi<Float>, phi);
 
-        // Fetch raw grid data
-        Spectrum actual_value = lookup_nearest(mi.wavelengths, theta, phi, active);
+        // 1. Direct Linear Interpolation (No log space)
+        Spectrum actual_value = lookup_interpolated(mi.wavelengths, theta, phi, active);
+        actual_value = dr::maximum(actual_value, 0.f);
 
-        // 🚨 SQUASH THE PEAK (Retains colors, kills the 10,000x explosion)
-        Spectrum value = dr::minimum(actual_value, 20.0f);
+        // 2. Apply the Squash/Limit
+        Spectrum value = dr::minimum(actual_value, m_fscatter_elimit);
 
-        // TRUE SPECTRAL MIS: Average the PDF across all wavelengths to bridge the ravines
+        // 3. Compute PDF using the CLAMPED value to keep weights stable
         Float pdf_avg = 0.f;
         if constexpr (is_spectral_v<Spectrum>) {
             for (size_t i = 0; i < Spectrum::Size; ++i) {
-                Float w_idx_i = dr::clip((mi.wavelengths[i] - m_min_wavelength) * m_wavelength_scale, 0.f, ScalarFloat(m_num_channels - 1));
+                Float w_idx_i = dr::clip((mi.wavelengths[i] - m_min_wavelength) * m_wavelength_scale,
+                                          0.f, ScalarFloat(m_num_channels - 1));
                 UInt32 w_int_i = dr::round2int<UInt32>(w_idx_i);
                 Float norm_i = dr::gather<Float>(m_pdf_norm, w_int_i, active);
+
+                // Use 'value' instead of 'actual_value' to balance MIS
                 pdf_avg += value[i] / dr::maximum(norm_i, 1e-8f);
             }
             pdf_avg /= ScalarFloat(Spectrum::Size);
@@ -177,7 +182,7 @@ public:
            Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::PhaseFunctionSample, active);
 
-        // ONE-SAMPLE MIS: Randomly select the driver wavelength
+        // --- Driver Wavelength Selection ---
         Float driver_wvl = mi.wavelengths[0];
         if constexpr (is_spectral_v<Spectrum>) {
             UInt32 driver_idx = dr::minimum(dr::floor2int<UInt32>(sample1 * Spectrum::Size), UInt32(Spectrum::Size - 1));
@@ -189,42 +194,51 @@ public:
         Float w_idx = dr::clip((driver_wvl - m_min_wavelength) * m_wavelength_scale, 0.f, ScalarFloat(m_num_channels - 1));
         UInt32 w_int = dr::round2int<UInt32>(w_idx);
 
-        // Sample using the driver
-        Float theta = sample_cdf_continuous(sample2.x(), m_marginal_cdf, w_int * m_theta_bins, m_theta_bins, dr::Pi<Float>, active);
-        UInt32 t_int = dr::clip(dr::round2int<UInt32>(theta * (Float(m_theta_bins - 1) * dr::InvPi<Float>)), 0u, m_theta_bins - 1u);
-        UInt32 cond_offset = w_int * (m_theta_bins * m_phi_bins) + t_int * m_phi_bins;
-        Float phi = sample_cdf_continuous(sample2.y(), m_conditional_cdf, cond_offset, m_phi_bins, 2.f * dr::Pi<Float>, active);
-
-        // 🚨 GEOMETRIC SNAP (Force the ray to align with the discrete bin)
+        // --- Continuous CDF Inversion (The Jitter Fix) ---
+        UInt32 t_int = sample_cdf_discrete(sample2.x(), m_marginal_cdf, w_int * m_theta_bins, m_theta_bins, active);
+        Float cdf_t0 = dr::gather<Float>(m_marginal_cdf, w_int * m_theta_bins + t_int, active);
+        Float cdf_t1 = dr::gather<Float>(m_marginal_cdf, w_int * m_theta_bins + dr::minimum(t_int + 1u, m_theta_bins - 1u), active);
+        Float t_frac = dr::select(cdf_t1 > cdf_t0, (sample2.x() - cdf_t0) / (cdf_t1 - cdf_t0), 0.f);
         Float d_theta = dr::Pi<Float> / Float(m_theta_bins - 1);
-        theta = dr::round2int<Float>(theta / d_theta) * d_theta;
+        Float theta = (Float(t_int) + t_frac) * d_theta;
 
+        UInt32 cond_offset = w_int * (m_theta_bins * m_phi_bins) + t_int * m_phi_bins;
+        UInt32 p_int = sample_cdf_discrete(sample2.y(), m_conditional_cdf, cond_offset, m_phi_bins, active);
         Float d_phi = 2.f * dr::Pi<Float> / Float(m_phi_bins > 1 ? m_phi_bins - 1 : 1);
-        phi = dr::round2int<Float>(phi / d_phi) * d_phi;
+        Float phi;
+        if (m_phi_bins > 1) {
+            Float cdf_p0 = dr::gather<Float>(m_conditional_cdf, cond_offset + p_int, active);
+            Float cdf_p1 = dr::gather<Float>(m_conditional_cdf, cond_offset + dr::minimum(p_int + 1u, m_phi_bins - 1u), active);
+            Float p_frac = dr::select(cdf_p1 > cdf_p0, (sample2.y() - cdf_p0) / (cdf_p1 - cdf_p0), 0.f);
+            phi = (Float(p_int) + p_frac) * d_phi;
+        } else {
+            phi = sample2.y() * 2.f * dr::Pi<Float>;
+        }
 
+        // --- Vector Math ---
         Vector3f s = dr::cross(m_up, mi.wi);
         Float s_norm = dr::norm(s);
         Mask valid_s = s_norm > 1e-6f;
         s = dr::select(valid_s, s / dr::maximum(s_norm, 1e-8f), Frame3f(mi.wi).s);
         Vector3f t = dr::cross(mi.wi, s);
-
         auto [sin_theta, cos_theta] = dr::sincos(theta);
         auto [sin_phi, cos_phi]     = dr::sincos(phi);
-
         Vector3f wo_local{ sin_theta * cos_phi, sin_theta * sin_phi, -cos_theta };
         Vector3f wo = s * wo_local.x() + t * wo_local.y() + mi.wi * wo_local.z();
 
-        // Fetch raw grid data
-        Spectrum actual_value = lookup_nearest(mi.wavelengths, theta, phi, active);
+        // --- Evaluation (Linear Space) ---
+        Spectrum actual_value = lookup_interpolated(mi.wavelengths, theta, phi, active);
+        actual_value = dr::maximum(actual_value, 0.f);
 
-        // 🚨 SQUASH THE PEAK
-        Spectrum value = dr::minimum(actual_value, 20.0f);
+        // --- Squash ---
+        Spectrum value = dr::minimum(actual_value, m_fscatter_elimit);
 
-        // TRUE SPECTRAL MIS
+        // --- PDF (Synced with Squash) ---
         Float pdf_avg = 0.f;
         if constexpr (is_spectral_v<Spectrum>) {
             for (size_t i = 0; i < Spectrum::Size; ++i) {
-                Float w_idx_i = dr::clip((mi.wavelengths[i] - m_min_wavelength) * m_wavelength_scale, 0.f, ScalarFloat(m_num_channels - 1));
+                Float w_idx_i = dr::clip((mi.wavelengths[i] - m_min_wavelength) * m_wavelength_scale,
+                                          0.f, ScalarFloat(m_num_channels - 1));
                 UInt32 w_int_i = dr::round2int<UInt32>(w_idx_i);
                 Float norm_i = dr::gather<Float>(m_pdf_norm, w_int_i, active);
                 pdf_avg += value[i] / dr::maximum(norm_i, 1e-8f);
@@ -232,7 +246,7 @@ public:
             pdf_avg /= ScalarFloat(Spectrum::Size);
         }
 
-        // Final Weight
+        // --- Final MIS-Corrected Weight ---
         Spectrum weight = dr::select(pdf_avg > 1e-8f, value / pdf_avg, 0.f);
 
         return { wo, weight, pdf_avg };
@@ -243,6 +257,7 @@ public:
             "AtmosphericPhaseFunction[LUT-only, Spectral-Anisotropic]\n"
             "  filename = \"%s\",\n"
             "  resolution = %ux%u,\n"
+            "  forward_scatter_limit = %f,\n"
             "  wavelength_bins = %u,\n"
             "  wavelength_range_nm = [%f, %f]\n"
             "]",
@@ -276,26 +291,18 @@ private:
         }
     }
 
-    // Continuous fractional CDF sampling (Prevents heavy pixelation in the render)
-    MI_INLINE Float sample_cdf_continuous(const Float &u, const FloatStorage& cdf_array, UInt32 base_offset, UInt32 resolution, Float max_val, Mask active) const {
+    MI_INLINE UInt32 sample_cdf_discrete(const Float &u, const FloatStorage& cdf_array, UInt32 base_offset, UInt32 resolution, Mask active) const {
         UInt32 lo = 0u, hi = resolution - 1u;
-        for (int it = 0; it < 13; ++it) {
+
+        for (int it = 0; it < 16; ++it) {
             UInt32 mid = (lo + hi) >> 1;
             Float c = dr::gather<Float>(cdf_array, base_offset + mid, active);
             Mask go_left = active && (u <= c);
             hi = dr::select(go_left, mid, hi);
             lo = dr::select(go_left, lo, mid + 1u);
         }
-        UInt32 idx = dr::minimum(lo, resolution - 1u);
-        UInt32 idx0 = dr::select(idx > 0u, idx - 1u, 0u);
 
-        Float c0 = dr::gather<Float>(cdf_array, base_offset + idx0, active);
-        Float c1 = dr::gather<Float>(cdf_array, base_offset + idx, active);
-        Float denom = dr::maximum(c1 - c0, 1e-12f);
-        Float s = dr::clip((u - c0) / denom, 0.f, 1.f);
-
-        Float idx_f = Float(idx0) + s;
-        return idx_f * (max_val / Float(resolution - 1u));
+        return dr::minimum(lo, resolution - 1u);
     }
 
     // Trilinear Interpolation (Theta x Phi x Wvl)
@@ -362,6 +369,7 @@ private:
     float m_min_wavelength = 0.f;
     float m_max_wavelength = 0.f;
     float m_wavelength_scale = 0.f;
+    float m_fscatter_elimit = 1.0f;
 };
 
 MI_EXPORT_PLUGIN(AtmosphericPhaseFunction)
