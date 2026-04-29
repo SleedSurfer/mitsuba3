@@ -136,6 +136,7 @@ public:
                                         Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::PhaseFunctionEvaluate, active);
 
+        // 1. Calculate the spherical coordinates of the outgoing ray 'wo'
         Float mu = -dr::dot(wo, mi.wi);
         Float theta = dr::acos(dr::clip(mu, -1.f, 1.f));
 
@@ -150,23 +151,26 @@ public:
         Float phi = dr::atan2(wo_t, wo_s);
         phi = dr::select(phi < 0.f, phi + 2.f * dr::Pi<Float>, phi);
 
-        // 1. Direct Linear Interpolation (No log space)
+        // 2. Fetch INTERPOLATED data (Linear space, smooth gradient)
         Spectrum actual_value = lookup_interpolated(mi.wavelengths, theta, phi, active);
         actual_value = dr::maximum(actual_value, 0.f);
 
-        // 2. Apply the Squash/Limit
+        // 3. APPLY THE LIMITER (This is the 'value' we give to the integrator)
         Spectrum value = dr::minimum(actual_value, m_fscatter_elimit);
 
-        // 3. Compute PDF using the CLAMPED value to keep weights stable
+        // 4. CALCULATE CONTINUOUS PDF
+        // We MUST use the squashed 'value' here so that (value / pdf) stays balanced.
         Float pdf_avg = 0.f;
         if constexpr (is_spectral_v<Spectrum>) {
             for (size_t i = 0; i < Spectrum::Size; ++i) {
                 Float w_idx_i = dr::clip((mi.wavelengths[i] - m_min_wavelength) * m_wavelength_scale,
                                           0.f, ScalarFloat(m_num_channels - 1));
                 UInt32 w_int_i = dr::round2int<UInt32>(w_idx_i);
+
+                // Get the normalization factor for this wavelength
                 Float norm_i = dr::gather<Float>(m_pdf_norm, w_int_i, active);
 
-                // Use 'value' instead of 'actual_value' to balance MIS
+                // The continuous PDF is the value divided by the total integral
                 pdf_avg += value[i] / dr::maximum(norm_i, 1e-8f);
             }
             pdf_avg /= ScalarFloat(Spectrum::Size);
