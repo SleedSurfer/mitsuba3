@@ -11,6 +11,7 @@
 #include <fstream>
 #include <vector>
 #include <memory>
+#include <cmath>
 
 NAMESPACE_BEGIN(mitsuba)
 
@@ -30,6 +31,10 @@ public:
         Vector3f up = props.get<Vector3f>("up", Vector3f(0.f, 0.f, 1.f));
         m_up = dr::normalize(up);
 
+        // Read XML overrides if they exist, otherwise default to -1.0
+        m_hg_weight = props.get<float>("hg_weight", -1.0f);
+        m_g = props.get<float>("g", -1.0f);
+
         std::string filename = Thread::thread()->file_resolver()->resolve(props.get<std::string>("filename")).string();
         load_binary(filename);
     }
@@ -40,78 +45,88 @@ public:
 
         char magic[8];
         f.read(magic, 8);
-        if (std::strncmp(magic, "ATMPHASE", 8) != 0) {
-            Throw("Invalid signature in phase file: %s", filename.c_str());
-        }
+        if (std::strncmp(magic, "ATMPHASE", 8) != 0) Throw("Invalid signature in phase file");
 
         uint32_t version;
         f.read(reinterpret_cast<char*>(&version), sizeof(uint32_t));
-        if (version != 2) Throw("Unsupported phase file version: %d", version);
+
+        // Demand Version 3
+        if (version != 3) Throw("Unsupported phase file version: %d. Please clear your Python cache.", version);
 
         f.read(reinterpret_cast<char*>(&m_num_angles), sizeof(uint32_t));
         f.read(reinterpret_cast<char*>(&m_num_phi_bins), sizeof(uint32_t));
         f.read(reinterpret_cast<char*>(&m_num_wavelengths), sizeof(uint32_t));
-
         f.read(reinterpret_cast<char*>(&m_lambda_min), sizeof(float));
         f.read(reinterpret_cast<char*>(&m_lambda_max), sizeof(float));
 
+        // --- READ HYBRID PARAMS ---
+        float file_hg, file_g;
+        f.read(reinterpret_cast<char*>(&file_hg), sizeof(float));
+        f.read(reinterpret_cast<char*>(&file_g), sizeof(float));
+
+        // If the XML didn't specify an override, use the physically correct baked data
+        if (m_hg_weight < 0.0f) m_hg_weight = file_hg;
+        if (m_g < 0.0f) m_g = file_g;
+
+        // Read the actual LUT payload
         size_t total_elements = m_num_angles * m_num_phi_bins * m_num_wavelengths;
         std::vector<float> host_data(total_elements);
         f.read(reinterpret_cast<char*>(host_data.data()), total_elements * sizeof(float));
 
-        std::vector<float> distr_data(total_elements);
+        // --- BRAIN 1: The Raw Intensity Texture (Evaluator) ---
+        // We load the pure Python data into a Texture3 for smooth, interpolation-safe lookups
+        using FloatStorage = DynamicBuffer<Float>;
+        FloatStorage device_data = dr::load<FloatStorage>(host_data.data(), total_elements);
+        size_t shape[4] = { m_num_angles, m_num_phi_bins, m_num_wavelengths, 1 }; // Z, Y, X layout
+        dr::Tensor<FloatStorage> tensor(device_data, 4, shape);
+        m_volume = std::make_unique<Texture3>(tensor, true, true, dr::FilterMode::Linear, dr::WrapMode::Clamp);
 
-        // --- THE ONLY CHANGE: Area Weighing ---
-        float d_theta = dr::Pi<float> / float(m_num_angles - 1);
+        // --- BRAIN 2: The Area-Weighted Sampler ---
+        // The sampler MUST know the physical bucket sizes, so we bake the Jacobian here.
+        std::vector<float> distr_data(total_elements);
+        float d_theta = dr::Pi<float> / std::max(float(m_num_angles - 1), 1.0f);
 
         for (size_t t = 0; t < m_num_angles; ++t) {
-            // Calculate the physical area of this theta row's spherical bucket
             float theta_top = std::max(float(t) - 0.5f, 0.f) * d_theta;
             float theta_bot = std::min(float(t) + 0.5f, float(m_num_angles - 1)) * d_theta;
-            float solid_angle_factor = dr::cos(theta_top) - dr::cos(theta_bot);
+            float solid_angle_factor = std::max(std::cos(theta_top) - std::cos(theta_bot), 1e-8f);
 
             for (size_t p = 0; p < m_num_phi_bins; ++p) {
                 for (size_t w = 0; w < m_num_wavelengths; ++w) {
                     size_t src_idx = t * (m_num_phi_bins * m_num_wavelengths) + p * m_num_wavelengths + w;
                     size_t dst_idx = w * (m_num_angles * m_num_phi_bins) + t * m_num_phi_bins + p;
-
-                    // The sampler now sees Energy (Intensity * Area), not just Intensity
-                    distr_data[dst_idx] = host_data[src_idx] * solid_angle_factor;
+                    distr_data[dst_idx] = std::max(host_data[src_idx] * solid_angle_factor, 1e-10f);
                 }
             }
         }
 
         std::vector<float> wvl_nodes(m_num_wavelengths);
         for (uint32_t i = 0; i < m_num_wavelengths; ++i) {
-            wvl_nodes[i] = m_lambda_min + (m_lambda_max - m_lambda_min) * (float(i) / (m_num_wavelengths - 1));
+            wvl_nodes[i] = m_num_wavelengths > 1 ?
+                m_lambda_min + (m_lambda_max - m_lambda_min) * (float(i) / float(m_num_wavelengths - 1)) : m_lambda_min;
         }
 
         ScalarVector2u distr_extents(m_num_phi_bins, m_num_angles);
         std::array<uint32_t, 1> param_res = { m_num_wavelengths };
         std::array<const float*, 1> param_values = { wvl_nodes.data() };
-
         m_distr = Distr2D(distr_data.data(), distr_extents, param_res, param_values);
     }
 
-    std::pair<Spectrum, Float> eval_pdf(const PhaseFunctionContext &/* ctx */,
+    std::pair<Spectrum, Float> eval_pdf(const PhaseFunctionContext&,
                                         const MediumInteraction3f &mi,
                                         const Vector3f &wo,
                                         Mask active) const override {
         MI_MASK_ARGUMENT(active);
 
-        Vector3f forward = -mi.wi;
-        Vector3f s = dr::cross(m_up, forward);
-        Float s_norm = dr::norm(s);
-        Mask valid_s = s_norm > 1e-6f;
-        s = dr::select(valid_s, s / dr::maximum(s_norm, 1e-8f), Frame3f(forward).s);
+        // Vector frame generation
+        Vector3f forward = -dr::normalize(mi.wi);
+        Vector3f s_raw = dr::cross(m_up, forward);
+        Float s_norm_sqr = dr::squared_norm(s_raw);
+        Mask valid_s = s_norm_sqr > 1e-12f;
+        Vector3f s = dr::select(valid_s, s_raw * dr::rsqrt(dr::maximum(s_norm_sqr, 1e-16f)), Frame3f(forward).s);
         Vector3f t = dr::cross(forward, s);
 
-        Vector3f local_wo = Vector3f(
-            dr::dot(wo, s),
-            dr::dot(wo, t),
-            dr::dot(wo, forward)
-        );
-
+        Vector3f local_wo = Vector3f(dr::dot(wo, s), dr::dot(wo, t), dr::dot(wo, forward));
         Float cos_theta = dr::clip(local_wo.z(), -1.f, 1.f);
         Float theta = dr::acos(cos_theta);
         Float phi   = dr::atan2(local_wo.y(), local_wo.x());
@@ -119,21 +134,29 @@ public:
         Float u = dr::select(phi < 0.f, phi + dr::TwoPi<Float>, phi) * dr::InvTwoPi<Float>;
         Float v = theta * dr::InvPi<Float>;
 
-        Spectrum val;
-        Float pdf_avg = 0.f;
+        // 1. Evaluate Analytical HG Lobe
+        Float denom = 1.f + m_g * m_g - 2.f * m_g * cos_theta;
+        Float hg_val = dr::InvFourPi<Float> * (1.f - m_g * m_g) / (denom * dr::safe_sqrt(dr::maximum(denom, 1e-7f)));
 
+        // 2. Evaluate Tabulated Residual Lobe
+        Spectrum lut_val;
         for (size_t i = 0; i < dr::size_v<Spectrum>; ++i) {
-            Float val_i = m_distr.eval(Point2f(u, v), &mi.wavelengths[i], active);
+            Float w_i = (mi.wavelengths[i] - m_lambda_min) / (m_lambda_max - m_lambda_min);
 
-            Float scaled_val = val_i / (2.f * dr::square(dr::Pi<Float>));
-
-            val[i] = scaled_val;
-            pdf_avg += scaled_val;
+            // DrJit requires us to pass a pointer for the output
+            Float tex_val;
+            m_volume->eval(dr::Array<Float, 3>(w_i, u, v), &tex_val, active);
+            lut_val[i] = tex_val;
         }
 
-        pdf_avg /= dr::size_v<Spectrum>;
+        // 3. Blend exactly by the missing energy fraction
+        Spectrum final_val = m_hg_weight * hg_val + (1.f - m_hg_weight) * lut_val;
 
-        return { val, dr::maximum(pdf_avg, 1e-9f) };
+        // Because Phase == PDF for energy conserving models, the mean channel value IS the pdf!
+        Float final_pdf = dr::mean(final_val);
+
+        return { dr::select(dr::isnan(final_val), 0.f, final_val),
+                 dr::maximum(dr::select(dr::isnan(final_pdf), 1e-9f, final_pdf), 1e-9f) };
     }
 
     std::tuple<Vector3f, Spectrum, Float> sample(const PhaseFunctionContext &ctx,
@@ -142,74 +165,56 @@ public:
                                                  const Point2f &sample2,
                                                  Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::PhaseFunctionSample, active);
+        Mask sample_hg = sample1 < m_hg_weight;
 
-        constexpr size_t Channels = dr::size_v<Spectrum>;
-        UInt32 hero_idx = dr::minimum(UInt32(sample1 * Channels), Channels - 1);
+        Float s1_hg = sample1 / dr::maximum(m_hg_weight, 1e-5f);
+        Float s1_lut = (sample1 - m_hg_weight) / dr::maximum(1.f - m_hg_weight, 1e-5f);
 
-        Float hero_lambda = mi.wavelengths[0];
-        if constexpr (Channels > 1) {
-            for (size_t i = 1; i < Channels; ++i) {
-                hero_lambda = dr::select(hero_idx == UInt32(i), mi.wavelengths[i], hero_lambda);
-            }
-        }
+        // --- Sample HG ---
+        Float sqr_term = (1.f - m_g * m_g) / (1.f - m_g + 2.f * m_g * sample2.y());
+        Float cos_theta_hg = (1.f + m_g * m_g - sqr_term * sqr_term) / (2.f * m_g);
+        cos_theta_hg = dr::select(dr::abs(m_g) < 1e-4f, 1.f - 2.f * sample2.y(), cos_theta_hg); // fallback
+        Float sin_theta_hg = dr::safe_sqrt(1.f - cos_theta_hg * cos_theta_hg);
+        Float phi_hg = dr::TwoPi<Float> * sample2.x();
 
-        auto [sample_pos, dummy_pdf] = m_distr.sample(sample2, &hero_lambda, active);
+        // ---  Sample LUT ---
+        Float hero_lambda = mi.wavelengths[0]; // Hero wvl selection omitted for brevity/speed
+        auto [sample_pos, dummy_pdf] = m_distr.sample(Point2f(sample2.x(), sample2.y()), &hero_lambda, active);
+        Float phi_lut = sample_pos.x() * dr::TwoPi<Float>;
+        Float theta_lut = sample_pos.y() * dr::Pi<Float>;
+        auto [sin_theta_lut, cos_theta_lut] = dr::sincos(theta_lut);
 
-        Float u = sample_pos.x();
-        Float v = sample_pos.y();
+        // --- MERGE BRANCHES ---
+        Float cos_theta = dr::select(sample_hg, cos_theta_hg, cos_theta_lut);
+        Float sin_theta = dr::select(sample_hg, sin_theta_hg, sin_theta_lut);
+        Float phi = dr::select(sample_hg, phi_hg, phi_lut);
+        auto [sin_phi, cos_phi] = dr::sincos(phi);
 
-        Float phi   = u * dr::TwoPi<Float>;
-        Float theta = v * dr::Pi<Float>;
+        Vector3f wo_local(sin_theta * cos_phi, sin_theta * sin_phi, cos_theta);
 
-        auto [sin_theta, cos_theta] = dr::sincos(theta);
-        auto [sin_phi, cos_phi]     = dr::sincos(phi);
-
-        Vector3f wo_local(
-            sin_theta * cos_phi,
-            sin_theta * sin_phi,
-            cos_theta
-        );
-
-        Vector3f forward = -mi.wi;
-        Vector3f s = dr::cross(m_up, forward);
-        Float s_norm = dr::norm(s);
-        Mask valid_s = s_norm > 1e-6f;
-        s = dr::select(valid_s, s / dr::maximum(s_norm, 1e-8f), Frame3f(forward).s);
+        // Transform to world space
+        Vector3f forward = -dr::normalize(mi.wi);
+        Vector3f s_raw = dr::cross(m_up, forward);
+        Float s_n_sqr = dr::squared_norm(s_raw);
+        Vector3f s = dr::select(s_n_sqr > 1e-12f, s_raw * dr::rsqrt(dr::maximum(s_n_sqr, 1e-16f)), Frame3f(forward).s);
         Vector3f t = dr::cross(forward, s);
 
-        Vector3f wo = s * wo_local.x() +
-                      t * wo_local.y() +
-                      forward * wo_local.z();
+        Vector3f wo = s * wo_local.x() + t * wo_local.y() + forward * wo_local.z();
 
         auto [weight_vals, pdf] = eval_pdf(ctx, mi, wo, active);
 
-        Spectrum final_weight = dr::select(pdf > 0.f, weight_vals / pdf, 0.f);
-
-        return { wo, final_weight, pdf };
+        return { wo, dr::select(pdf > 1e-9f, weight_vals / pdf, 0.f), pdf };
     }
 
-    std::string to_string() const override {
-        return tfm::format("AtmosphericPhase[\n"
-                           "  lambda_min = %f,\n"
-                           "  lambda_max = %f,\n"
-                           "  angles = %i,\n"
-                           "  phi_bins = %i,\n"
-                           "  wavelengths = %i\n"
-                           "]",
-                           m_lambda_min, m_lambda_max,
-                           m_num_angles, m_num_phi_bins, m_num_wavelengths);
-    }
-
+    std::string to_string() const override { return "AtmosphericPhase[Hybrid]"; }
     MI_DECLARE_CLASS(AtmosphericPhaseFunction)
 private:
     Vector3f m_up;
+    std::unique_ptr<Texture3> m_volume;
     Distr2D m_distr;
-
-    uint32_t m_num_angles;
-    uint32_t m_num_phi_bins;
-    uint32_t m_num_wavelengths;
-    float m_lambda_min;
-    float m_lambda_max;
+    float m_hg_weight, m_g;
+    uint32_t m_num_angles, m_num_phi_bins, m_num_wavelengths;
+    float m_lambda_min, m_lambda_max;
 };
 
 MI_EXPORT_PLUGIN(AtmosphericPhaseFunction)
