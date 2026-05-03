@@ -8,7 +8,7 @@ import mitsuba as mi
 if __name__ == '__main__':
     mi.set_variant('llvm_spectral')
 
-from practical_path_guiding.src.common import *
+from vMF.common import *
 import numpy as np
 import math
 
@@ -17,7 +17,6 @@ from vMF.Models.vMF_mixture import vMFMixture
 
 
 class vMF_KDTreeNode:
-    # Explicitly unrolled K=3 vMF mixture arrays for perfect SIMD memory alignment
     DRJIT_STRUCT = {
         'bbox': mi.BoundingBox3f,
         'depth': mi.UInt32,
@@ -25,13 +24,10 @@ class vMF_KDTreeNode:
         'isLeaf': mi.Bool,
         'child_left_index': mi.UInt32,
         'child_right_index': mi.UInt32,
-
-        # vMF Lobe 1
-        'vmf_w0': mi.Float, 'vmf_mu0': mi.Vector3f, 'vmf_kappa0': mi.Float,
-        # vMF Lobe 2
-        'vmf_w1': mi.Float, 'vmf_mu1': mi.Vector3f, 'vmf_kappa1': mi.Float,
-        # vMF Lobe 3
-        'vmf_w2': mi.Float, 'vmf_mu2': mi.Vector3f, 'vmf_kappa2': mi.Float,
+        **{f'vmf_w{i}': mi.Float for i in range(8)},
+        **{f'vmf_mu{i}': mi.Vector3f for i in range(8)},
+        **{f'vmf_kappa{i}': mi.Float for i in range(8)},
+        'fluence': mi.Float,
     }
 
     def __init__(self) -> None:
@@ -41,48 +37,43 @@ class vMF_KDTreeNode:
         self.isLeaf = mi.Bool()
         self.child_left_index = mi.UInt32()
         self.child_right_index = mi.UInt32()
+        self.fluence = dr.zeros(mi.Float, 1)
 
-        # THE FIX: Explicit dr.full allocation binds this to physical LLVM memory
-        # so resizeDrJitArray can actually see and copy the values.
-        self.vmf_w0 = dr.full(mi.Float, 1.0 / 3.0, 1)
-        self.vmf_w1 = dr.full(mi.Float, 1.0 / 3.0, 1)
-        self.vmf_w2 = dr.full(mi.Float, 1.0 / 3.0, 1)
+        # Initialize all 8 lobes with uniform energy and slightly jittered directions
+        # to prevent EM from collapsing on day one.
+        for i in range(8):
+            setattr(self, f'vmf_w{i}', dr.full(mi.Float, 1.0 / 8.0, 1))
+            setattr(self, f'vmf_kappa{i}', dr.full(mi.Float, 1.0, 1))
+            # Distribute mus across axes
+            axis_val = [0.0, 0.0, 0.0]
+            axis_val[i % 3] = 1.0
+            setattr(self, f'vmf_mu{i}', mi.Vector3f(axis_val))
 
-        self.vmf_mu0 = mi.Vector3f(dr.full(mi.Float, 1.0, 1), dr.zeros(mi.Float, 1), dr.zeros(mi.Float, 1))
-        self.vmf_mu1 = mi.Vector3f(dr.zeros(mi.Float, 1), dr.full(mi.Float, 1.0, 1), dr.zeros(mi.Float, 1))
-        self.vmf_mu2 = mi.Vector3f(dr.zeros(mi.Float, 1), dr.zeros(mi.Float, 1), dr.full(mi.Float, 1.0, 1))
+    def copyFrom(self, other: 'vMF_KDTreeNode') -> None:
+        for key in self.DRJIT_STRUCT.keys():
+            setattr(self, key, type(getattr(self, key))(getattr(other, key)))
 
-        self.vmf_kappa0 = dr.full(mi.Float, 5.0, 1)
-        self.vmf_kappa1 = dr.full(mi.Float, 5.0, 1)
-        self.vmf_kappa2 = dr.full(mi.Float, 5.0, 1)
+    def resize(self, newSize: mi.UInt32) -> None:
+        self.depth = resizeDrJitArray(self.depth, newSize)
+        self.vertCount = resizeDrJitArray(self.vertCount, newSize)
+        self.isLeaf = resizeDrJitArray(self.isLeaf, newSize, isDefaultZero=False)
+        self.child_left_index = resizeDrJitArray(self.child_left_index, newSize)
+        self.child_right_index = resizeDrJitArray(self.child_right_index, newSize)
+        self.fluence = resizeDrJitArray(self.fluence, newSize)
 
-        dr.eval(self.vmf_mu0.x)
-        print(f"\n[DIAG 1 | Init] vmf_mu0.x width: {dr.width(self.vmf_mu0.x)} | data: {self.vmf_mu0.x.numpy()}")
+        bbox_min = resizeDrJitArray(self.bbox.min, newSize)
+        bbox_max = resizeDrJitArray(self.bbox.max, newSize)
+        self.bbox = mi.BoundingBox3f(bbox_min, bbox_max)
 
-    def copyFrom(self, other_node: 'vMF_KDTreeNode') -> None:
-        """
-        Deep copies the vectorized memory arrays from another node into this one.
-        """
-        self.bbox = mi.BoundingBox3f(other_node.bbox.min, other_node.bbox.max)
-        self.depth = mi.UInt32(other_node.depth)
-        self.vertCount = mi.Float(other_node.vertCount)
-        self.isLeaf = mi.Bool(other_node.isLeaf)
-        self.child_left_index = mi.UInt32(other_node.child_left_index)
-        self.child_right_index = mi.UInt32(other_node.child_right_index)
-
-        # Copy vMF Mixtures
-        self.vmf_w0 = mi.Float(other_node.vmf_w0)
-        self.vmf_w1 = mi.Float(other_node.vmf_w1)
-        self.vmf_w2 = mi.Float(other_node.vmf_w2)
-
-        # Vector3f copies component-wise safely
-        self.vmf_mu0 = mi.Vector3f(other_node.vmf_mu0)
-        self.vmf_mu1 = mi.Vector3f(other_node.vmf_mu1)
-        self.vmf_mu2 = mi.Vector3f(other_node.vmf_mu2)
-
-        self.vmf_kappa0 = mi.Float(other_node.vmf_kappa0)
-        self.vmf_kappa1 = mi.Float(other_node.vmf_kappa1)
-        self.vmf_kappa2 = mi.Float(other_node.vmf_kappa2)
+        for i in range(8):
+            setattr(self, f'vmf_w{i}', resizeDrJitArray(getattr(self, f'vmf_w{i}'), newSize))
+            setattr(self, f'vmf_kappa{i}', resizeDrJitArray(getattr(self, f'vmf_kappa{i}'), newSize))
+            mu = getattr(self, f'vmf_mu{i}')
+            setattr(self, f'vmf_mu{i}', mi.Vector3f(
+                resizeDrJitArray(mu.x, newSize),
+                resizeDrJitArray(mu.y, newSize),
+                resizeDrJitArray(mu.z, newSize)
+            ))
 
     def getWidth(self) -> int:
         return dr.width(self.depth)
@@ -100,77 +91,28 @@ class vMF_KDTreeNode:
 
         return mi.BoundingBox3f(bbox_min, bbox_max)
 
-    def resize(self, newSize: mi.UInt32) -> None:
-        """Resizes the KDTree arrays to accommodate splits."""
-        self.depth = resizeDrJitArray(self.depth, newSize)
-        self.vertCount = resizeDrJitArray(self.vertCount, newSize)
-        self.isLeaf = resizeDrJitArray(self.isLeaf, newSize, isDefaultZero=False)
-        self.child_left_index = resizeDrJitArray(self.child_left_index, newSize)
-        self.child_right_index = resizeDrJitArray(self.child_right_index, newSize)
-
-        bbox_min = resizeDrJitArray(self.bbox.min, newSize)
-        bbox_max = resizeDrJitArray(self.bbox.max, newSize)
-        self.bbox = mi.BoundingBox3f(bbox_min, bbox_max)
-
-        # Flat float arrays are fine
-        self.vmf_w0 = resizeDrJitArray(self.vmf_w0, newSize)
-        self.vmf_w1 = resizeDrJitArray(self.vmf_w1, newSize)
-        self.vmf_w2 = resizeDrJitArray(self.vmf_w2, newSize)
-
-        self.vmf_kappa0 = resizeDrJitArray(self.vmf_kappa0, newSize)
-        self.vmf_kappa1 = resizeDrJitArray(self.vmf_kappa1, newSize)
-        self.vmf_kappa2 = resizeDrJitArray(self.vmf_kappa2, newSize)
-
-        # THE FIX: Explicitly unroll the Vector3f components to survive reallocation
-        self.vmf_mu0 = mi.Vector3f(
-            resizeDrJitArray(self.vmf_mu0.x, newSize),
-            resizeDrJitArray(self.vmf_mu0.y, newSize),
-            resizeDrJitArray(self.vmf_mu0.z, newSize)
-        )
-        self.vmf_mu1 = mi.Vector3f(
-            resizeDrJitArray(self.vmf_mu1.x, newSize),
-            resizeDrJitArray(self.vmf_mu1.y, newSize),
-            resizeDrJitArray(self.vmf_mu1.z, newSize)
-        )
-        self.vmf_mu2 = mi.Vector3f(
-            resizeDrJitArray(self.vmf_mu2.x, newSize),
-            resizeDrJitArray(self.vmf_mu2.y, newSize),
-            resizeDrJitArray(self.vmf_mu2.z, newSize)
-        )
-
-        dr.eval(self.depth, self.vertCount, self.isLeaf, self.child_left_index, self.child_right_index, self.bbox.min,
-                self.bbox.max)
-        dr.eval(self.vmf_w0, self.vmf_w1, self.vmf_w2, self.vmf_mu0, self.vmf_mu1, self.vmf_mu2, self.vmf_kappa0,
-                self.vmf_kappa1, self.vmf_kappa2)
-
-
 class vMF_KDTree:
-    def __init__(self, max_leaf_size: float = 1, maxDepth: int = 10) -> None:
-        # Dr.Jit allocates the memory and fills everything with 0.0
+    def __init__(self, max_leaf_size: float = 1, maxDepth: int = 20) -> None:
+        # 1. ALLOCATE THE MEMORY FIRST
         self.kdTreeNode: vMF_KDTreeNode = dr.zeros(vMF_KDTreeNode, shape=1)
 
+        # 2. NOW INITIALIZE THE ROOT NODE DATA
         self.kdTreeNode.isLeaf = mi.Bool(True)
         self.kdTreeNode.bbox = mi.BoundingBox3f([0, 0, 0], [1, 1, 1])
+        self.kdTreeNode.fluence = dr.zeros(mi.Float, 1)
 
-        # --- THE FIX: RESURRECT THE DATA ---
-        # We explicitly inject the starting vMF values into the zeroed-out root node.
-        self.kdTreeNode.vmf_w0 = dr.full(mi.Float, 1.0 / 3.0, 1)
-        self.kdTreeNode.vmf_w1 = dr.full(mi.Float, 1.0 / 3.0, 1)
-        self.kdTreeNode.vmf_w2 = dr.full(mi.Float, 1.0 / 3.0, 1)
+        # Unrolled initialization for 8 lobes
+        for i in range(8):
+            setattr(self.kdTreeNode, f'vmf_w{i}', dr.full(mi.Float, 1.0 / 8.0, 1))
+            setattr(self.kdTreeNode, f'vmf_kappa{i}', dr.full(mi.Float, 1.0, 1))
 
-        self.kdTreeNode.vmf_mu0 = mi.Vector3f(dr.full(mi.Float, 1.0, 1), dr.zeros(mi.Float, 1),
-                                              dr.zeros(mi.Float, 1))
-        self.kdTreeNode.vmf_mu1 = mi.Vector3f(dr.zeros(mi.Float, 1), dr.full(mi.Float, 1.0, 1),
-                                              dr.zeros(mi.Float, 1))
-        self.kdTreeNode.vmf_mu2 = mi.Vector3f(dr.zeros(mi.Float, 1), dr.zeros(mi.Float, 1),
-                                              dr.full(mi.Float, 1.0, 1))
+            # Simple jitter for mus
+            axis = [0.0, 0.0, 0.0]
+            axis[i % 3] = 1.0
+            setattr(self.kdTreeNode, f'vmf_mu{i}', mi.Vector3f(axis))
 
-        self.kdTreeNode.vmf_kappa0 = dr.full(mi.Float, 5.0, 1)
-        self.kdTreeNode.vmf_kappa1 = dr.full(mi.Float, 5.0, 1)
-        self.kdTreeNode.vmf_kappa2 = dr.full(mi.Float, 5.0, 1)
-
-        dr.eval(self.kdTreeNode.vmf_w0, self.kdTreeNode.vmf_mu0, self.kdTreeNode.vmf_kappa0)
-        # -----------------------------------
+        # 3. SEAL THE GRAPH
+        dr.eval(self.kdTreeNode)
 
         self.maxLeafSize = max_leaf_size
         self.maxDepth = maxDepth
@@ -202,7 +144,6 @@ class vMF_KDTree:
         newsize = oldSize + numNewNode
         self.kdTreeNode.resize(newsize)
         dr.eval(self.kdTreeNode.vmf_mu0.x)
-        print(f"[DIAG 2 | Post-Resize] vmf_mu0.x width: {dr.width(self.kdTreeNode.vmf_mu0.x)} | data: {self.kdTreeNode.vmf_mu0.x.numpy()}")
 
         childrenNodeIndex = dr.arange(mi.UInt32, numSplitNode)
         child_left_index = childrenNodeIndex * 2 + 0 + oldSize
@@ -314,160 +255,115 @@ class vMF_KDTree:
             # Seal the graph
             dr.eval(self.kdTreeNode.vertCount, self.kdTreeNode.bbox.min, self.kdTreeNode.bbox.max)
             dr.eval(self.kdTreeNode.vmf_mu0, self.kdTreeNode.vmf_mu1, self.kdTreeNode.vmf_mu2)
-            print(
-                f"[DIAG 3 | Post-Inherit] vmf_mu0.x width: {dr.width(self.kdTreeNode.vmf_mu0.x)} | data: {self.kdTreeNode.vmf_mu0.x.numpy()}\n")
 
     def fit_mixtures_to_record(self, leaf_indices: mi.UInt32,
                                directions: mi.Vector3f, weights: mi.Float,
                                directions_nee: mi.Vector3f, weights_nee: mi.Float,
-                               active: mi.Bool, current_iteration: int, iterations: int = 4) -> None:
+                               active: mi.Bool, current_iteration: int, iterations: int = 12) -> None:
         num_leaves = self.kdTreeNode.getWidth()
+        K = 8
 
-        w0, w1, w2 = self.kdTreeNode.vmf_w0, self.kdTreeNode.vmf_w1, self.kdTreeNode.vmf_w2
-        mu0, mu1, mu2 = self.kdTreeNode.vmf_mu0, self.kdTreeNode.vmf_mu1, self.kdTreeNode.vmf_mu2
-        k0, k1, k2 = self.kdTreeNode.vmf_kappa0, self.kdTreeNode.vmf_kappa1, self.kdTreeNode.vmf_kappa2
+        # 1. GATHER INITIAL STATE
+        orig_ws = [getattr(self.kdTreeNode, f'vmf_w{i}') for i in range(K)]
+        orig_mus = [getattr(self.kdTreeNode, f'vmf_mu{i}') for i in range(K)]
+        orig_ks = [getattr(self.kdTreeNode, f'vmf_kappa{i}') for i in range(K)]
 
-        orig_w0, orig_w1, orig_w2 = w0, w1, w2
-        orig_mu0, orig_mu1, orig_mu2 = mu0, mu1, mu2
-        orig_k0, orig_k1, orig_k2 = k0, k1, k2
+        ws, mus, ks = list(orig_ws), list(orig_mus), list(orig_ks)
 
         valid_ray = active & (weights > 1e-6)
         valid_nee = active & (weights_nee > 1e-6)
 
+        # Calculate raw radiometric weight per leaf
         leaf_total_weight = dr.zeros(mi.Float, num_leaves)
         dr.scatter_reduce(dr.ReduceOp.Add, leaf_total_weight, weights, leaf_indices, valid_ray)
         dr.scatter_reduce(dr.ReduceOp.Add, leaf_total_weight, weights_nee, leaf_indices, valid_nee)
 
+        # FIX 1: Calculate actual photon count (N) per leaf
+        leaf_N = dr.zeros(mi.Float, num_leaves)
+        dr.scatter_reduce(dr.ReduceOp.Add, leaf_N, mi.Float(1.0), leaf_indices, valid_ray)
+        dr.scatter_reduce(dr.ReduceOp.Add, leaf_N, mi.Float(1.0), leaf_indices, valid_nee)
+        dr.eval(leaf_total_weight, leaf_N)
+
         leaf_has_data = leaf_total_weight > 1e-6
 
+        # FIX 1 (Cont.): Normalize weights to sum to N_leaf for the MAP-EM prior compatibility
+        scale_factor = dr.select(leaf_has_data, leaf_N / leaf_total_weight, 0.0)
+
+        # Gather the per-leaf scale factor back to the per-photon lanes
+        gathered_scale = dr.gather(mi.Float, scale_factor, leaf_indices, valid_ray)
+        gathered_scale_nee = dr.gather(mi.Float, scale_factor, leaf_indices, valid_nee)
+
+        norm_weights = weights * gathered_scale
+        norm_weights_nee = weights_nee * gathered_scale_nee
+
+        def eval_vmf(mu, kappa, d):
+            cos_t = dr.dot(mu, d)
+            safe_kappa = dr.maximum(kappa, 1e-4)
+            norm = safe_kappa / (dr.two_pi * (1.0 - dr.exp(-2.0 * safe_kappa)))
+            return dr.select(kappa < 1e-4, dr.inv_four_pi, norm * dr.exp(safe_kappa * (cos_t - 1.0)))
+
         for _ in range(iterations):
-            r_w0 = dr.gather(mi.Float, w0, leaf_indices, valid_ray)
-            r_w1 = dr.gather(mi.Float, w1, leaf_indices, valid_ray)
-            r_w2 = dr.gather(mi.Float, w2, leaf_indices, valid_ray)
-            r_mu0 = dr.gather(mi.Vector3f, mu0, leaf_indices, valid_ray)
-            r_mu1 = dr.gather(mi.Vector3f, mu1, leaf_indices, valid_ray)
-            r_mu2 = dr.gather(mi.Vector3f, mu2, leaf_indices, valid_ray)
-            r_k0 = dr.gather(mi.Float, k0, leaf_indices, valid_ray)
-            r_k1 = dr.gather(mi.Float, k1, leaf_indices, valid_ray)
-            r_k2 = dr.gather(mi.Float, k2, leaf_indices, valid_ray)
+            # --- E-STEP ---
+            g_ws = [dr.gather(mi.Float, ws[i], leaf_indices, active) for i in range(K)]
+            g_mus = [dr.gather(mi.Vector3f, mus[i], leaf_indices, active) for i in range(K)]
+            g_ks = [dr.gather(mi.Float, ks[i], leaf_indices, active) for i in range(K)]
 
-            # Re-gather for NEE to prevent width mismatches
-            rn_w0 = dr.gather(mi.Float, w0, leaf_indices, valid_nee)
-            rn_w1 = dr.gather(mi.Float, w1, leaf_indices, valid_nee)
-            rn_w2 = dr.gather(mi.Float, w2, leaf_indices, valid_nee)
-            rn_mu0 = dr.gather(mi.Vector3f, mu0, leaf_indices, valid_nee)
-            rn_mu1 = dr.gather(mi.Vector3f, mu1, leaf_indices, valid_nee)
-            rn_mu2 = dr.gather(mi.Vector3f, mu2, leaf_indices, valid_nee)
-            rn_k0 = dr.gather(mi.Float, k0, leaf_indices, valid_nee)
-            rn_k1 = dr.gather(mi.Float, k1, leaf_indices, valid_nee)
-            rn_k2 = dr.gather(mi.Float, k2, leaf_indices, valid_nee)
+            pdfs_ray = [g_ws[i] * eval_vmf(g_mus[i], g_ks[i], directions) for i in range(K)]
+            sum_pdf_ray = sum(pdfs_ray)
+            resps_ray = [dr.select(sum_pdf_ray > 1e-8, p / sum_pdf_ray, 1.0 / K) for p in pdfs_ray]
 
-            def eval_vmf(mu, kappa, d):
-                cos_t = dr.dot(mu, d)
-                safe_kappa = dr.maximum(kappa, 1e-4)
-                norm = safe_kappa / (dr.two_pi * (1.0 - dr.exp(-2.0 * safe_kappa)))
-                return dr.select(kappa < 1e-4, dr.inv_four_pi, norm * dr.exp(kappa * (cos_t - 1.0)))
+            pdfs_nee = [g_ws[i] * eval_vmf(g_mus[i], g_ks[i], directions_nee) for i in range(K)]
+            sum_pdf_nee = sum(pdfs_nee)
+            resps_nee = [dr.select(sum_pdf_nee > 1e-8, p / sum_pdf_nee, 1.0 / K) for p in pdfs_nee]
 
-            # E-STEP NORMAL
-            pdf0 = r_w0 * eval_vmf(r_mu0, r_k0, directions)
-            pdf1 = r_w1 * eval_vmf(r_mu1, r_k1, directions)
-            pdf2 = r_w2 * eval_vmf(r_mu2, r_k2, directions)
-            sum_pdf = pdf0 + pdf1 + pdf2
-            valid_pdf = sum_pdf > 1e-8
-            resp0 = dr.select(valid_pdf, pdf0 / sum_pdf, 1.0 / 3.0)
-            resp1 = dr.select(valid_pdf, pdf1 / sum_pdf, 1.0 / 3.0)
-            resp2 = dr.select(valid_pdf, pdf2 / sum_pdf, 1.0 / 3.0)
+            # --- M-STEP ---
+            for i in range(K):
+                # Use the statistically normalized weights here
+                contrib_ray = resps_ray[i] * norm_weights
+                contrib_nee = resps_nee[i] * norm_weights_nee
 
-            # E-STEP NEE
-            pdf0_nee = rn_w0 * eval_vmf(rn_mu0, rn_k0, directions_nee)
-            pdf1_nee = rn_w1 * eval_vmf(rn_mu1, rn_k1, directions_nee)
-            pdf2_nee = rn_w2 * eval_vmf(rn_mu2, rn_k2, directions_nee)
-            sum_pdf_nee = pdf0_nee + pdf1_nee + pdf2_nee
-            valid_pdf_nee = sum_pdf_nee > 1e-8
-            resp0_nee = dr.select(valid_pdf_nee, pdf0_nee / sum_pdf_nee, 1.0 / 3.0)
-            resp1_nee = dr.select(valid_pdf_nee, pdf1_nee / sum_pdf_nee, 1.0 / 3.0)
-            resp2_nee = dr.select(valid_pdf_nee, pdf2_nee / sum_pdf_nee, 1.0 / 3.0)
+                sum_w = dr.zeros(mi.Float, num_leaves)
+                R = dr.zeros(mi.Vector3f, num_leaves)
 
-            # M-STEP
-            eff_w0, eff_w1, eff_w2 = resp0 * weights, resp1 * weights, resp2 * weights
-            eff_w0_nee, eff_w1_nee, eff_w2_nee = resp0_nee * weights_nee, resp1_nee * weights_nee, resp2_nee * weights_nee
+                dr.scatter_reduce(dr.ReduceOp.Add, sum_w, contrib_ray, leaf_indices, valid_ray)
+                dr.scatter_reduce(dr.ReduceOp.Add, sum_w, contrib_nee, leaf_indices, valid_nee)
 
-            sum_eff_w0, sum_eff_w1, sum_eff_w2 = dr.zeros(mi.Float, num_leaves), dr.zeros(mi.Float, num_leaves), dr.zeros(mi.Float, num_leaves)
-            R0, R1, R2 = dr.zeros(mi.Vector3f, num_leaves), dr.zeros(mi.Vector3f, num_leaves), dr.zeros(mi.Vector3f, num_leaves)
+                for c in ['x', 'y', 'z']:
+                    dr.scatter_reduce(dr.ReduceOp.Add, getattr(R, c), getattr(directions, c) * contrib_ray,
+                                      leaf_indices, valid_ray)
+                    dr.scatter_reduce(dr.ReduceOp.Add, getattr(R, c), getattr(directions_nee, c) * contrib_nee,
+                                      leaf_indices, valid_nee)
 
-            # Accumulate Normal
-            dr.scatter_reduce(dr.ReduceOp.Add, sum_eff_w0, eff_w0, leaf_indices, valid_ray)
-            dr.scatter_reduce(dr.ReduceOp.Add, sum_eff_w1, eff_w1, leaf_indices, valid_ray)
-            dr.scatter_reduce(dr.ReduceOp.Add, sum_eff_w2, eff_w2, leaf_indices, valid_ray)
-            dr.scatter_reduce(dr.ReduceOp.Add, R0.x, directions.x * eff_w0, leaf_indices, valid_ray)
-            dr.scatter_reduce(dr.ReduceOp.Add, R0.y, directions.y * eff_w0, leaf_indices, valid_ray)
-            dr.scatter_reduce(dr.ReduceOp.Add, R0.z, directions.z * eff_w0, leaf_indices, valid_ray)
-            dr.scatter_reduce(dr.ReduceOp.Add, R1.x, directions.x * eff_w1, leaf_indices, valid_ray)
-            dr.scatter_reduce(dr.ReduceOp.Add, R1.y, directions.y * eff_w1, leaf_indices, valid_ray)
-            dr.scatter_reduce(dr.ReduceOp.Add, R1.z, directions.z * eff_w1, leaf_indices, valid_ray)
-            dr.scatter_reduce(dr.ReduceOp.Add, R2.x, directions.x * eff_w2, leaf_indices, valid_ray)
-            dr.scatter_reduce(dr.ReduceOp.Add, R2.y, directions.y * eff_w2, leaf_indices, valid_ray)
-            dr.scatter_reduce(dr.ReduceOp.Add, R2.z, directions.z * eff_w2, leaf_indices, valid_ray)
+                alpha_prior, beta_prior = 10.0, 0.8
+                r_bar_λ = (alpha_prior * beta_prior + dr.norm(R)) / (alpha_prior + sum_w)
 
-            # Accumulate NEE
-            dr.scatter_reduce(dr.ReduceOp.Add, sum_eff_w0, eff_w0_nee, leaf_indices, valid_nee)
-            dr.scatter_reduce(dr.ReduceOp.Add, sum_eff_w1, eff_w1_nee, leaf_indices, valid_nee)
-            dr.scatter_reduce(dr.ReduceOp.Add, sum_eff_w2, eff_w2_nee, leaf_indices, valid_nee)
-            dr.scatter_reduce(dr.ReduceOp.Add, R0.x, directions_nee.x * eff_w0_nee, leaf_indices, valid_nee)
-            dr.scatter_reduce(dr.ReduceOp.Add, R0.y, directions_nee.y * eff_w0_nee, leaf_indices, valid_nee)
-            dr.scatter_reduce(dr.ReduceOp.Add, R0.z, directions_nee.z * eff_w0_nee, leaf_indices, valid_nee)
-            dr.scatter_reduce(dr.ReduceOp.Add, R1.x, directions_nee.x * eff_w1_nee, leaf_indices, valid_nee)
-            dr.scatter_reduce(dr.ReduceOp.Add, R1.y, directions_nee.y * eff_w1_nee, leaf_indices, valid_nee)
-            dr.scatter_reduce(dr.ReduceOp.Add, R1.z, directions_nee.z * eff_w1_nee, leaf_indices, valid_nee)
-            dr.scatter_reduce(dr.ReduceOp.Add, R2.x, directions_nee.x * eff_w2_nee, leaf_indices, valid_nee)
-            dr.scatter_reduce(dr.ReduceOp.Add, R2.y, directions_nee.y * eff_w2_nee, leaf_indices, valid_nee)
-            dr.scatter_reduce(dr.ReduceOp.Add, R2.z, directions_nee.z * eff_w2_nee, leaf_indices, valid_nee)
+                r_safe = dr.minimum(r_bar_λ, 0.9999)
+                new_k = (r_safe * (3.0 - dr.square(r_safe))) / (1.0 - dr.square(r_safe))
+                new_k = dr.minimum(new_k, 30.0)
+                new_mu = dr.normalize(dr.select(dr.norm(R) > 1e-6, R, mus[i]))
 
-            def update_lobe(old_w, old_mu, old_k, sum_eff_w, R_vec):
-                new_w = sum_eff_w / dr.select(leaf_has_data, leaf_total_weight, 1.0)
-                r_vec = dr.select(sum_eff_w > 1e-6, R_vec / sum_eff_w, old_mu)
-                r_bar = dr.norm(r_vec)
-                new_mu = dr.select(r_bar > 1e-6, r_vec / r_bar, old_mu)
-                r_safe = dr.minimum(r_bar, 0.9999)
-                r2 = r_safe * r_safe
-                new_k = dr.select(sum_eff_w > 1e-6, (r_safe * (3.0 - r2)) / (1.0 - r2), 0.0)
-                return (
-                    dr.select(leaf_has_data, new_w, old_w),
-                    dr.select(leaf_has_data, new_mu, old_mu),
-                    dr.select(leaf_has_data, new_k, old_k)
-                )
+                # Weight update: proportion of energy in this lobe relative to leaf total
+                new_w = sum_w / dr.select(leaf_has_data, leaf_N, 1.0)
 
-            w0, mu0, k0 = update_lobe(w0, mu0, k0, sum_eff_w0, R0)
-            w1, mu1, k1 = update_lobe(w1, mu1, k1, sum_eff_w1, R1)
-            w2, mu2, k2 = update_lobe(w2, mu2, k2, sum_eff_w2, R2)
+                ws[i] = dr.select(leaf_has_data, new_w, ws[i])
+                mus[i] = dr.select(leaf_has_data, new_mu, mus[i])
+                ks[i] = dr.select(leaf_has_data, new_k, ks[i])
 
-        MAX_KAPPA = mi.Float(50.0)
-        k0 = dr.minimum(k0, MAX_KAPPA)
-        k1 = dr.minimum(k1, MAX_KAPPA)
-        k2 = dr.minimum(k2, MAX_KAPPA)
+            # FIX 2: Evaluate the computational graph at the end of every EM iteration
+            # Prevents LLVM from choking on a massive unrolled loop
+            dr.eval(*ws, *mus, *ks)
 
+        # 3. LERP INTO STORAGE
         lr = mi.Float(1.0 / (float(current_iteration) + 1.0))
+        total_w = sum(ws)
+        for i in range(K):
+            final_w = dr.lerp(orig_ws[i], ws[i] / dr.select(total_w > 0, total_w, 1.0), lr)
+            final_mu = dr.normalize(dr.lerp(orig_mus[i], mus[i], lr))
+            final_k = dr.minimum(dr.lerp(orig_ks[i], ks[i], lr), 30.0)
 
-        w0 = dr.lerp(orig_w0, w0, lr)
-        w1 = dr.lerp(orig_w1, w1, lr)
-        w2 = dr.lerp(orig_w2, w2, lr)
-
-        mu0 = dr.normalize(dr.lerp(orig_mu0, mu0, lr))
-        mu1 = dr.normalize(dr.lerp(orig_mu1, mu1, lr))
-        mu2 = dr.normalize(dr.lerp(orig_mu2, mu2, lr))
-
-        k0 = dr.lerp(orig_k0, k0, lr)
-        k1 = dr.lerp(orig_k1, k1, lr)
-        k2 = dr.lerp(orig_k2, k2, lr)
-
-        tot_w = w0 + w1 + w2
-        w0 = dr.select(leaf_has_data & (tot_w > 0), w0 / tot_w, w0)
-        w1 = dr.select(leaf_has_data & (tot_w > 0), w1 / tot_w, w1)
-        w2 = dr.select(leaf_has_data & (tot_w > 0), w2 / tot_w, w2)
-
-        self.kdTreeNode.vmf_w0, self.kdTreeNode.vmf_w1, self.kdTreeNode.vmf_w2 = w0, w1, w2
-        self.kdTreeNode.vmf_mu0, self.kdTreeNode.vmf_mu1, self.kdTreeNode.vmf_mu2 = mu0, mu1, mu2
-        self.kdTreeNode.vmf_kappa0, self.kdTreeNode.vmf_kappa1, self.kdTreeNode.vmf_kappa2 = k0, k1, k2
+            setattr(self.kdTreeNode, f'vmf_w{i}', final_w)
+            setattr(self.kdTreeNode, f'vmf_mu{i}', final_mu)
+            setattr(self.kdTreeNode, f'vmf_kappa{i}', final_k)
 
         dr.eval(self.kdTreeNode)
 
@@ -526,30 +422,15 @@ class vMF_KDTree:
     # =========================================================================
 
     def query_mixture(self, position: mi.Vector3f, active: mi.Bool = True) -> vMFMixture:
-        """
-        Takes a world position, finds the corresponding KD-Tree leaf,
-        and reconstructs the full vMFMixture on the fly for the integrator.
-        """
         leaf_idx = self.getLeafNodeIndex(position, active)
 
-        # Gather all 3 lobes using pure Structure of Arrays layout
-        w0 = dr.gather(mi.Float, self.kdTreeNode.vmf_w0, leaf_idx, active)
-        w1 = dr.gather(mi.Float, self.kdTreeNode.vmf_w1, leaf_idx, active)
-        w2 = dr.gather(mi.Float, self.kdTreeNode.vmf_w2, leaf_idx, active)
+        weights, mus, kappas = [], [], []
+        for i in range(8):
+            weights.append(dr.gather(mi.Float, getattr(self.kdTreeNode, f'vmf_w{i}'), leaf_idx, active))
+            mus.append(dr.gather(mi.Vector3f, getattr(self.kdTreeNode, f'vmf_mu{i}'), leaf_idx, active))
+            kappas.append(dr.gather(mi.Float, getattr(self.kdTreeNode, f'vmf_kappa{i}'), leaf_idx, active))
 
-        mu0 = dr.gather(mi.Vector3f, self.kdTreeNode.vmf_mu0, leaf_idx, active)
-        mu1 = dr.gather(mi.Vector3f, self.kdTreeNode.vmf_mu1, leaf_idx, active)
-        mu2 = dr.gather(mi.Vector3f, self.kdTreeNode.vmf_mu2, leaf_idx, active)
-
-        kappa0 = dr.gather(mi.Float, self.kdTreeNode.vmf_kappa0, leaf_idx, active)
-        kappa1 = dr.gather(mi.Float, self.kdTreeNode.vmf_kappa1, leaf_idx, active)
-        kappa2 = dr.gather(mi.Float, self.kdTreeNode.vmf_kappa2, leaf_idx, active)
-
-        return vMFMixture(
-            weights=[w0, w1, w2],
-            mus=[mu0, mu1, mu2],
-            kappas=[kappa0, kappa1, kappa2]
-        )
+        return vMFMixture(weights=weights, mus=mus, kappas=kappas)
 
     def resetTreeVertCount(self) -> None:
         """
@@ -565,49 +446,39 @@ class vMF_KDTree:
     def saveToFile(self, fileName: str) -> None:
         """
         Saves the KD-Tree topology and the unrolled vMF SoA arrays into a compressed numpy file.
+        Dynamically captures all 8 lobes so we stop giving the integrator amnesia.
         """
-        np.savez_compressed(
-            file=fileName,
-
+        save_dict = {
             # Hyperparameters
-            kdtree_maxLeafSize=self.maxLeafSize,
-            kdtree_maxDepth=self.maxDepth,
+            'kdtree_maxLeafSize': self.maxLeafSize,
+            'kdtree_maxDepth': self.maxDepth,
 
             # KD-Tree Spatial Topology
-            kdtree_bbox_min_x=self.kdTreeNode.bbox.min.x.numpy(),
-            kdtree_bbox_min_y=self.kdTreeNode.bbox.min.y.numpy(),
-            kdtree_bbox_min_z=self.kdTreeNode.bbox.min.z.numpy(),
-            kdtree_bbox_max_x=self.kdTreeNode.bbox.max.x.numpy(),
-            kdtree_bbox_max_y=self.kdTreeNode.bbox.max.y.numpy(),
-            kdtree_bbox_max_z=self.kdTreeNode.bbox.max.z.numpy(),
+            'kdtree_bbox_min_x': self.kdTreeNode.bbox.min.x.numpy(),
+            'kdtree_bbox_min_y': self.kdTreeNode.bbox.min.y.numpy(),
+            'kdtree_bbox_min_z': self.kdTreeNode.bbox.min.z.numpy(),
+            'kdtree_bbox_max_x': self.kdTreeNode.bbox.max.x.numpy(),
+            'kdtree_bbox_max_y': self.kdTreeNode.bbox.max.y.numpy(),
+            'kdtree_bbox_max_z': self.kdTreeNode.bbox.max.z.numpy(),
 
-            kdtree_depth=self.kdTreeNode.depth.numpy(),
-            kdtree_vertCount=self.kdTreeNode.vertCount.numpy(),
-            kdtree_isLeaf=self.kdTreeNode.isLeaf.numpy(),
-            kdtree_child_left_index=self.kdTreeNode.child_left_index.numpy(),
-            kdtree_child_right_index=self.kdTreeNode.child_right_index.numpy(),
+            'kdtree_depth': self.kdTreeNode.depth.numpy(),
+            'kdtree_vertCount': self.kdTreeNode.vertCount.numpy(),
+            'kdtree_isLeaf': self.kdTreeNode.isLeaf.numpy(),
+            'kdtree_child_left_index': self.kdTreeNode.child_left_index.numpy(),
+            'kdtree_child_right_index': self.kdTreeNode.child_right_index.numpy(),
+        }
 
-            # The Brain (vMF Lobes)
-            vmf_w0=self.kdTreeNode.vmf_w0.numpy(),
-            vmf_w1=self.kdTreeNode.vmf_w1.numpy(),
-            vmf_w2=self.kdTreeNode.vmf_w2.numpy(),
+        # The Brain (Dynamically save all K lobes)
+        for i in range(8):
+            save_dict[f'vmf_w{i}'] = getattr(self.kdTreeNode, f'vmf_w{i}').numpy()
+            save_dict[f'vmf_kappa{i}'] = getattr(self.kdTreeNode, f'vmf_kappa{i}').numpy()
 
-            vmf_kappa0=self.kdTreeNode.vmf_kappa0.numpy(),
-            vmf_kappa1=self.kdTreeNode.vmf_kappa1.numpy(),
-            vmf_kappa2=self.kdTreeNode.vmf_kappa2.numpy(),
+            mu = getattr(self.kdTreeNode, f'vmf_mu{i}')
+            save_dict[f'vmf_mu{i}_x'] = mu.x.numpy()
+            save_dict[f'vmf_mu{i}_y'] = mu.y.numpy()
+            save_dict[f'vmf_mu{i}_z'] = mu.z.numpy()
 
-            vmf_mu0_x=self.kdTreeNode.vmf_mu0.x.numpy(),
-            vmf_mu0_y=self.kdTreeNode.vmf_mu0.y.numpy(),
-            vmf_mu0_z=self.kdTreeNode.vmf_mu0.z.numpy(),
-
-            vmf_mu1_x=self.kdTreeNode.vmf_mu1.x.numpy(),
-            vmf_mu1_y=self.kdTreeNode.vmf_mu1.y.numpy(),
-            vmf_mu1_z=self.kdTreeNode.vmf_mu1.z.numpy(),
-
-            vmf_mu2_x=self.kdTreeNode.vmf_mu2.x.numpy(),
-            vmf_mu2_y=self.kdTreeNode.vmf_mu2.y.numpy(),
-            vmf_mu2_z=self.kdTreeNode.vmf_mu2.z.numpy(),
-        )
+        np.savez_compressed(file=fileName, **save_dict)
 
     def loadFromFile(self, dataNumpy: np.array) -> None:
         """
@@ -631,20 +502,17 @@ class vMF_KDTree:
             mi.Vector3f(dataNumpy['kdtree_bbox_max_x'], dataNumpy['kdtree_bbox_max_y'], dataNumpy['kdtree_bbox_max_z'])
         )
 
-        # Load The Brain (vMF Lobes)
-        self.kdTreeNode.vmf_w0 = mi.Float(dataNumpy['vmf_w0'])
-        self.kdTreeNode.vmf_w1 = mi.Float(dataNumpy['vmf_w1'])
-        self.kdTreeNode.vmf_w2 = mi.Float(dataNumpy['vmf_w2'])
+        # Load The Brain (Dynamically reconstruct all K lobes)
+        for i in range(8):
+            setattr(self.kdTreeNode, f'vmf_w{i}', mi.Float(dataNumpy[f'vmf_w{i}']))
+            setattr(self.kdTreeNode, f'vmf_kappa{i}', mi.Float(dataNumpy[f'vmf_kappa{i}']))
+            setattr(self.kdTreeNode, f'vmf_mu{i}', mi.Vector3f(
+                dataNumpy[f'vmf_mu{i}_x'],
+                dataNumpy[f'vmf_mu{i}_y'],
+                dataNumpy[f'vmf_mu{i}_z']
+            ))
 
-        self.kdTreeNode.vmf_kappa0 = mi.Float(dataNumpy['vmf_kappa0'])
-        self.kdTreeNode.vmf_kappa1 = mi.Float(dataNumpy['vmf_kappa1'])
-        self.kdTreeNode.vmf_kappa2 = mi.Float(dataNumpy['vmf_kappa2'])
-
-        self.kdTreeNode.vmf_mu0 = mi.Vector3f(dataNumpy['vmf_mu0_x'], dataNumpy['vmf_mu0_y'], dataNumpy['vmf_mu0_z'])
-        self.kdTreeNode.vmf_mu1 = mi.Vector3f(dataNumpy['vmf_mu1_x'], dataNumpy['vmf_mu1_y'], dataNumpy['vmf_mu1_z'])
-        self.kdTreeNode.vmf_mu2 = mi.Vector3f(dataNumpy['vmf_mu2_x'], dataNumpy['vmf_mu2_y'], dataNumpy['vmf_mu2_z'])
-
-        # Seal the memory graph
+        # Seal the memory graph so DrJit doesn't unalive itself
         dr.eval(self.kdTreeNode)
 
 if __name__ == '__main__':
