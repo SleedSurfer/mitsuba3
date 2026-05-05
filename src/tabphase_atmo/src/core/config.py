@@ -92,24 +92,23 @@ class BaseParticleConfig:
         are always sampled, preventing 'invisible' UV/IR bounds from stealing samples.
         """
         # If we have a healthy amount of samples, uniform spacing is mathematically best for the CDF
+        # --- THE PHYSICS BRANCH (High Res) ---
         if self.num_wavelengths >= 12:
-            return np.linspace(self.min_wavelength_nm, self.max_wavelength_nm, self.num_wavelengths).tolist()
+            # Linear delta Nu: better captures the dispersion of water/ice
+            f_min = 1.0 / self.max_wavelength_nm
+            f_max = 1.0 / self.min_wavelength_nm
+
+            # Sample evenly in frequency (1/lambda)
+            freq_steps = np.linspace(f_min, f_max, self.num_wavelengths)
+
+            # Map back to wavelength and sort for the renderer
+            return sorted((1.0 / freq_steps).tolist())
 
         # For "dirty" bakes, we prioritize the core optical anchors.
         # Order:            Green(Luma), Blue, Red, Deep Violet, Deep Red, Cyan, Yellow, Edge IR, Edge UV
         priority_anchors = [540.0,      450.0,650.0,   400.0,      700.0, 490.0, 590.0,   770.0,   380.0, 420.0, 620.0]
-
-        # Take the top N requested
         selected = priority_anchors[:self.num_wavelengths]
-
-        # If they ask for exactly 11 but somehow trigger this branch, fallback gracefully
-        if self.num_wavelengths > len(priority_anchors):
-            return np.linspace(self.min_wavelength_nm, self.max_wavelength_nm, self.num_wavelengths).tolist()
-
-        # Clamp them to the user's defined boundaries just in case they modified min/max
         clamped = [max(self.min_wavelength_nm, min(w, self.max_wavelength_nm)) for w in selected]
-
-        # Sort them linearly so the renderer processes them sequentially (helps with debugging output)
         return sorted(clamped)
 
     def _calculate_ior_array(self) -> List[float]:
