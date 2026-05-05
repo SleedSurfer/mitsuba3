@@ -7,8 +7,7 @@ from ..models.ray_patch import RayPatch
 
 class GridEmitter:
     @staticmethod
-    def emit(grid_res: int, width_mm: float, offset_x: float, offset_y: float, rot_angle: float,
-             pol: str = 'X') -> tuple:
+    def emit(grid_res: int, width_mm: float, offset_x: float, offset_y: float, rot_angle: float) -> tuple:
         num_rays = grid_res * grid_res
         index = dr.arange(UInt32, num_rays)
         ix = index % grid_res
@@ -32,12 +31,10 @@ class GridEmitter:
         rays.basis_x = Array3f(1.0, 0.0, 0.0)
         rays.basis_y = Array3f(0.0, 1.0, 0.0)
 
-        if pol == 'X':
-            rays.Ex = Complex2f(1.0, 0.0)
-            rays.Ey = Complex2f(0.0, 0.0)
-        else:
-            rays.Ex = Complex2f(0.0, 0.0)
-            rays.Ey = Complex2f(1.0, 0.0)
+        rays.Ex_X = Complex2f(1.0, 0.0)
+        rays.Ey_X = Complex2f(0.0, 0.0)
+        rays.Ex_Y = Complex2f(0.0, 0.0)
+        rays.Ey_Y = Complex2f(1.0, 0.0)
 
         rays.opt_path_length = Float(0.0)
 

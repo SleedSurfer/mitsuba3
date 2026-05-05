@@ -1,5 +1,6 @@
 import mitsuba as mi
 
+from benchmarks.accumulation_bench.bench_scenes import cornell_fog_cloud, sunsky_cloud, cloud
 from config import HexagonalHabit, HexagonalComposition, DropletComposition
 from src.core.config import Particle, BackendType, DropletShape
 
@@ -10,17 +11,22 @@ from accumulation_bench.engine import run_render_bench
 from accumulation_bench.bench_scenes import Ice_sunsky, pure_rainbow,mitsuba3cornell,cornell_fog_sphere
 import accumulation_bench.bench_scenes.cornell_exact as fogbox
 
+RES_M = 16 #BEAUTY PASS
+
 # --- CONFIG ---
 CONFIG = {
     'target_spp': -1,
-    'batch_size': 64,
-    #'res_w':512,
-    #'res_w':1024,
-    #'res_h':512,
-    #'res_h':1024,
-    'res_w':128,
-    'res_h':128,
-    'downscale_res': (512, 512),
+    'batch_size': 16,
+    # 'res_w':512,
+    # 'res_h':512,
+    # 'res_w':1024,
+    # 'res_h':1024,
+    'res_w':64*RES_M,
+    'res_h':35*RES_M,
+    # 'res_w':8,
+    # 'res_h':8,
+
+    'downscale_res': (1024,1024),
     'show_previews': False,
     'denoise_enabled': False,
 }
@@ -28,57 +34,126 @@ CONFIG = {
 if __name__ == "__main__":
     print("Wake the fuck up samurai, we have a cpu to burn.")
 
-    mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 50.0, 0.01)],
-                            num_angles=4096,
-                            num_wavelengths=17,
-                            num_phi_bins=360,
-                            backend=BackendType.MIEPYTHON)
 
-    # run_name = f"mitsuba3cornell/RTSphereLight_emitter_facing_wall/beam"
-    # scene_dict = cornell_fog_sphere.get_scene(CONFIG,mist)
+
+
+    # mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 8.0, 0.006)],
+    #                         num_angles=8192,
+    #                         num_wavelengths=33,
+    #                         num_phi_bins=360,
+    #                         backend=BackendType.MIEPYTHON)
+    # mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 1500.0, 0.0)],
+    #                         num_angles=8192,
+    #                         num_wavelengths=6,
+    #                         num_phi_bins=360,
+    #                         backend=BackendType.DRJIT)
+    # rain = Particle.droplet(composition=[DropletComposition(DropletShape.OBLATE, 0.2, 400.0, 0.02),
+    #                                      DropletComposition(DropletShape.SPHERE, 0.8, 400.0, 0.02)],
+    #                         num_angles=8192,
+    #                         num_wavelengths=36,
+    #                         num_phi_bins=2048,
+    #                         backend=BackendType.DRJIT)
+    #rain = ""
+
+    # SUN_ELEVATION = 22.0
+    # TURBULENCE = 1
+    # cfg = Particle.hexagonal(
+    #     num_angles=8192,
+    #     num_phi_bins=1024,
+    #     num_wavelengths=32,
+    #     backend=BackendType.DRJIT,
+    #     sun_elevation_deg=SUN_ELEVATION,
+    #     air_turbulence_factor=TURBULENCE,
+    #     composition=[
+    #         HexagonalComposition(HexagonalHabit.TUMBLING, 0.2, 1500, 800, 0.05),
+    #         HexagonalComposition(HexagonalHabit.PLATE, 0.3,  800, 1500, 0.05),
+    #         HexagonalComposition(HexagonalHabit.COLUMN_HORIZONTAL, 0.5, 1500, 800, 0.05),
+    #     ]
+    # )
+
+    cfg = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 8.0, 0.3)],
+                                      num_angles=8192,
+                                      num_wavelengths=33,
+                                      num_phi_bins=360,
+                                      backend=BackendType.MIEPYTHON)
+
+    run_name = "disney_cloud"
+    dictionary = cloud.get_scene(CONFIG,cfg)
+    run_render_bench(dictionary, run_name=run_name, config=CONFIG)
+
+    # run_name="sunsky_cloud_single_HG"
+    # dictionary = sunsky_cloud.get_scene(CONFIG, cfg)
+    # run_render_bench(dictionary, run_name=run_name, config=CONFIG)
+    # run_name = "grih"
+    # dictionary = cornell_fog_sphere.get_scene(CONFIG, cfg)
+    # run_render_bench(dictionary, run_name=run_name, config=CONFIG)
+
+    # cfg = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 300.0, 0.0)],
+    #                        num_angles=8192,
+    #                        num_wavelengths=6,
+    #                        num_phi_bins=360,
+    #                        backend=BackendType.MIEPYTHON)
+    # run_name = "rainbow test"
+    # dictionary = pure_rainbow.get_scene(CONFIG, cfg)
+    # run_render_bench(dictionary, run_name=run_name, config=CONFIG)
+
+
+
+    # mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 8.0, 0.1)],
+    #                         num_angles=8192,
+    #                         num_wavelengths=33,
+    #                         num_phi_bins=360,
+    #                         backend=BackendType.MIEPYTHON)
+    # # mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 1500.0, 0.0)],
+    # #                         num_angles=8192,
+    # #                         num_wavelengths=6,
+    # #                         num_phi_bins=360,
+    # #                         backend=BackendType.DRJIT)
+    #
+    # run_name = f"blowout_cap1/8um/0var"
+    # scene_dict = cornell_fog_sphere.get_scene(CONFIG, mist)
     # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
 
-    # mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0,8.0, 0.5)],
+
+
+    # mist = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0,8.0, 0.0)],
     #                         num_angles=4096,
     #                         num_wavelengths=17,
     #                         num_phi_bins=360,
     #                         backend=BackendType.MIEPYTHON)
-    # run_name = f"mietest/20um"
+    # run_name = f"mietest/8um/0var"
     # scene_dict = pure_rainbow.get_scene(CONFIG, mist)
     # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
-
-    # rain = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 2000.0, 0.0)],
+    #
+    #
+    # rain = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 300.0, 0.0)],
     #                         num_angles=8192*2,
-    #                         num_wavelengths=17,
+    #                         num_wavelengths=32,
     #                         num_phi_bins=360,
-    #                         backend=BackendType.DRJIT)
-
-    run_name = f"blowouts"
-    scene_dict = cornell_fog_sphere.get_scene(CONFIG, mist)
-    run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
-
-
-    #run_name = f"Jittest/2000um"
+    #                         backend=BackendType.MIEPYTHON)
+    #
+    # run_name = f"mietest/300um/0var"
+    # scene_dict = pure_rainbow.get_scene(CONFIG, rain)
+    # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
+    #
+    # rain = Particle.droplet(composition=[DropletComposition(DropletShape.SPHERE, 1.0, 400.0, 0.00)],
+    #                         num_angles=8192 * 2,
+    #                         num_wavelengths=32,
+    #                         num_phi_bins=360,
+    #                         backend=BackendType.MIEPYTHON)
+    #
+    # run_name = f"Jittest_d32/300um/50var"
     # scene_dict = pure_rainbow.get_scene(CONFIG, rain)
     # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
 
-    # run_name = f"mitsuba3cornell/MieSphereLight_emitter_facing_wall_final/20um"
-    # scene_dict = cornell_fog_sphere.get_scene(CONFIG, mist)
-    # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
-
-    # run_name = f"mitsuba3cornell/MieFogRoom/8um"
-    # scene_dict = fogbox.get_scene(config=CONFIG,phase=mist)
-    # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
-
-    # #CBOX default:
-    # run_name = f"mitsuba3cornell/HGSphere09/"
-    # scene_dict = cornell_fog_sphere.get_scene(CONFIG)
-    # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
-
-
-    # #CBOX default:
-    # run_name = f"mitsuba3cornell/default/"
-    # scene_dict = mitsuba3cornell.get_scene(CONFIG)
+    # rain = Particle.droplet(composition=[DropletComposition(DropletShape.OBLATE, 0.5, 400.0, 0.02),DropletComposition(DropletShape.SPHERE, 0.5, 400.0, 0.02),],
+    #                         num_angles=8192,
+    #                         num_wavelengths=36,
+    #                         num_phi_bins=2048,
+    #                         backend=BackendType.DRJIT)
+    #
+    # run_name = f"Oblate_test"
+    # scene_dict = pure_rainbow.get_scene(CONFIG, rain)
     # run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
 
     # # # ===============================
@@ -105,24 +180,55 @@ if __name__ == "__main__":
     # )
     #
     #
+
+
+
+    # SUN_ELEVATIONS = [40.0,50.0,70.0,120.0]#5.0,10.0,22.0,
+    # TURBULENCES = [1,3,7]
+    #
+    #
+    # for elevation in SUN_ELEVATIONS:
+    #     for turbulence in TURBULENCES:
+    #         cfg = Particle.hexagonal(
+    #             num_angles=4096,
+    #             num_phi_bins=2048,
+    #             num_wavelengths=24,
+    #             backend=BackendType.DRJIT,
+    #             sun_elevation_deg=elevation,
+    #             air_turbulence_factor=turbulence,
+    #             composition=[
+    #                 HexagonalComposition(HexagonalHabit.TUMBLING, 0.4, 1500, 800, 0.0),
+    #                 HexagonalComposition(HexagonalHabit.PLATE, 0.3, 800, 1500, 0.0),
+    #                 HexagonalComposition(HexagonalHabit.COLUMN_HORIZONTAL, 0.2, 1500, 800, 0.0),
+    #                 HexagonalComposition(HexagonalHabit.PARRY, 0.1, 1500, 800, 0.0)
+    #             ]
+    #         )
+    #         run_name = f"Halo_Beautyshot/turb_{turbulence}/elev_{elevation}"
+    #         scene_dict = Ice_sunsky.get_scene(CONFIG, cfg, sun_elevation_deg=elevation)
+    #
+    #         print(f"\n>>> STARTING BATCH: HALO Turbulence={turbulence}, elevation={elevation}")
+    #         print(f">>> Target Path: {run_name}")
+    #
+    #         run_render_bench(scene_dict, run_name=run_name, config=CONFIG)
+
+
+
+
     # SUN_ELEVATION = 22.0
     # TURBULENCE = 1
     # cfg = Particle.hexagonal(
-    #     num_angles=4096,
-    #     num_phi_bins=1080,
-    #     num_wavelengths=6,
+    #     num_angles=8192,
+    #     num_phi_bins=360,
+    #     num_wavelengths=32,
     #     backend=BackendType.DRJIT,
     #     sun_elevation_deg=SUN_ELEVATION,
     #     air_turbulence_factor=TURBULENCE,
     #     composition=[
-    #         HexagonalComposition(HexagonalHabit.TUMBLING, 0.3, 1500, 800, 0.0),
-    #         HexagonalComposition(HexagonalHabit.PLATE, 0.3, 800, 1500, 0.0),
-    #         HexagonalComposition(HexagonalHabit.COLUMN_HORIZONTAL, 0.2, 1500, 800, 0.05),
-    #         HexagonalComposition(HexagonalHabit.PARRY, 0.2, 1500, 800, 0.05)
+    #         HexagonalComposition(HexagonalHabit.TUMBLING, 1.0, 1500, 800, 0.0)
     #     ]
     # )
     #
-    # run_name = f"Halo_Mixed/turb_{TURBULENCE}/elev_{SUN_ELEVATION}"
+    # run_name = f"Halo_pure/turb_{TURBULENCE}/elev_{SUN_ELEVATION}"
     # scene_dict = Ice_sunsky.get_scene(CONFIG, cfg, sun_elevation_deg=SUN_ELEVATION)
     #
     # print(f"\n>>> STARTING BATCH: HALO Turbulence={TURBULENCE}, elevation={SUN_ELEVATION}")

@@ -1,24 +1,13 @@
 import numpy as np
 from scipy.special import j1
-
-def get_airy_diffraction(theta_rad, radius_um, wavelength_nm):
-    """
-    Computes Fraunhofer diffraction forward peak for a specific effective radius.
-    """
-    wavelength_um = wavelength_nm / 1000.0
-    size_param = (2.0 * np.pi * radius_um) / wavelength_um
-
-    theta_safe = np.maximum(theta_rad, 1e-7)
-    u = size_param * np.sin(theta_safe)
-
-    airy_intensity = (2.0 * j1(u) / u) ** 2
-    return airy_intensity * (size_param ** 2) / (4.0 * np.pi)
+import scipy.sparse as sp
 
 
 def _build_blur_matrix(theta_rad, variance):
     """
-    Constructs a universal (N x N) Gaussian blur transformation matrix.
-    Doing this once saves billions of redundant calculations.
+    Constructs a dense (N x N) Gaussian blur transformation matrix.
+    Truncates beyond 4-sigma to prevent mathematical ghosting.
+    Returns a raw numpy array. No SciPy CSR overhead.
     """
     N = len(theta_rad)
     d_theta = theta_rad[1] - theta_rad[0]
@@ -37,33 +26,39 @@ def _build_blur_matrix(theta_rad, variance):
 
     W = np.exp(-0.5 * ((j_grid - i_grid) / sigma_grid) ** 2)
 
-    row_sums = np.sum(W, axis=1, keepdims=True)
-    W /= row_sums
+    # Dynamic 4-sigma cutoff: kill the useless tail weights
+    W[np.abs(j_grid - i_grid) > 4.0 * sigma_grid] = 0.0
 
-    return W
+    row_sums = np.sum(W, axis=1, keepdims=True)
+
+    # Safe divide to prevent NaN, return pure dense numpy array
+    return np.divide(W, row_sums, out=np.zeros_like(W), where=row_sums != 0)
 
 
 def apply_polydispersity_filter(phase_table, num_angles, variance):
     theta_rad = np.linspace(0, np.pi, num_angles)
-    sin_theta = np.sin(theta_rad)
 
-    print(f"[Filter] Constructing {num_angles}x{num_angles} Blur Matrix...")
+    # Grab the raw dense matrix
     W = _build_blur_matrix(theta_rad, variance)
+
     original_shape = phase_table.shape
-    flat_phase = phase_table.reshape(-1, num_angles)
+    num_wavelengths = original_shape[0]
 
-    original_integrals = np.trapezoid(flat_phase * sin_theta, theta_rad, axis=1)
+    smoothed_phase = np.zeros_like(phase_table)
 
-    log_phase = np.log(np.maximum(flat_phase, 1e-12))
-    print(f"[Filter] Applying Tensor Convolution...")
-    result_log = log_phase @ W.T
+    print(f"[Filter] Processing {num_wavelengths} wavelength chunks (Dense Log-Space)...")
 
-    smoothed_phase = np.exp(result_log)
+    for w in range(num_wavelengths):
+        # Extract 2D slice: (Azimuths, Angles)
+        chunk = phase_table[w, :, :]
 
-    new_integrals = np.trapezoid(smoothed_phase * sin_theta, theta_rad, axis=1)
-    safe_new = np.maximum(new_integrals, 1e-12)
-    correction = original_integrals / safe_new
+        log_chunk = np.log(np.maximum(chunk, 1e-12))
 
-    smoothed_phase *= correction[:, None]
+        # Apply the dense matrix convolution using standard numpy matmul
+        result_log = (W @ log_chunk.T).T
 
-    return smoothed_phase.reshape(original_shape)
+        # Exponentiate and immediately assign.
+        # Energy conservation is handled globally by normalize_macroscopic_phase.
+        smoothed_phase[w, :, :] = np.exp(result_log)
+
+    return smoothed_phase

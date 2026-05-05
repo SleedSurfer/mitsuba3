@@ -25,28 +25,23 @@ class PhotonCollectionSphere:
     def reset(self):
         self.bins_intensity = dr.zeros(Float, self.total_bins)
 
-    def accumulate(self, rays, hit_mask: Bool):
-        # 1. Get direction of surviving rays
+    def accumulate(self, rays, hit_mask: dr.auto.Bool):
         dx, dy, dz = rays.direction.x, rays.direction.y, rays.direction.z
-
-        # 2. Convert to spherical coordinates
         theta = dr.acos(dr.clip(dz, -1.0, 1.0))
         phi = dr.atan2(dy, dx)
 
-        # 3. Map to array indices (Using floor to prevent rounding artifacts)
         theta_coord = (theta / Float(np.pi)) * Float(self.num_theta_bins - 1)
         normalized_phi = (phi + Float(np.pi)) / Float(2.0 * np.pi)
         phi_coord = normalized_phi * Float(self.num_phi_bins)
 
-        th_idx = dr.clip(UInt32(dr.floor(theta_coord)), 0, self.num_theta_bins - 1)
-        phi_idx = UInt32(dr.floor(phi_coord)) % self.num_phi_bins
+        th_idx = dr.clip(dr.auto.UInt32(dr.floor(theta_coord)), 0, self.num_theta_bins - 1)
+        phi_idx = dr.auto.UInt32(dr.floor(phi_coord)) % self.num_phi_bins
 
         flat_idx = phi_idx * self.num_theta_bins + th_idx
 
-        # 4. Calculate pure energy (magnitude squared of the E field)
-        energy = dr.squared_norm(rays.Ex) + dr.squared_norm(rays.Ey)
+        # 4. Use the unpolarized energy weight directly
+        energy = rays.weight
 
-        # 5. Scatter Add (Atomic add on the GPU/CPU)
         dr.scatter_add(self.bins_intensity, energy, flat_idx, hit_mask)
 
     def finalize(self) -> np.ndarray:

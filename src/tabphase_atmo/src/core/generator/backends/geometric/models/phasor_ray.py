@@ -8,8 +8,10 @@ class PhasorRay():
     """
     origin: Array3f
     direction: Array3f
-    Ex: Complex2f
-    Ey: Complex2f
+    Ex_X: Complex2f
+    Ey_X: Complex2f
+    Ex_Y: Complex2f
+    Ey_Y: Complex2f
     opt_path_length: Float
     focal_lines_crossed: Int
     basis_x: Array3f

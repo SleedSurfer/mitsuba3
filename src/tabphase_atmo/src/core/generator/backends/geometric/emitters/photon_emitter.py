@@ -2,12 +2,11 @@ import drjit as dr
 from drjit.auto import Float, Array3f, Complex2f, PCG32, UInt32
 import numpy as np
 
-from ..models.phasor_ray import PhasorRay
-
+from ..models.photon_ray import PhotonRay
 
 class PhotonEmitter:
     @staticmethod
-    def emit(num_rays: int, target_radius_mm: float, rng, pol: str = 'X') -> PhasorRay:
+    def emit(num_rays: int, target_radius_mm: float, rng) -> PhotonRay:
         u1 = rng.next_float32()
         u2 = rng.next_float32()
 
@@ -20,18 +19,9 @@ class PhotonEmitter:
 
         direction = Array3f(0.0, 0.0, 1.0)
 
-        if pol == 'X':
-            ex, ey = Complex2f(1.0, 0.0), Complex2f(0.0, 0.0)
-        else:
-            ex, ey = Complex2f(0.0, 0.0), Complex2f(1.0, 0.0)
-
-        rays = PhasorRay(
+        rays = PhotonRay(
             origin=Array3f(ox, oy, oz),
             direction=direction,
-            Ex=ex, Ey=ey,
-            basis_x=Array3f(1.0, 0.0, 0.0),
-            basis_y=Array3f(0.0, 1.0, 0.0),
-            opt_path_length=Float(0.0),
-            focal_lines_crossed=dr.zeros(UInt32, num_rays)
+            weight=dr.ones(Float, num_rays)
         )
         return rays

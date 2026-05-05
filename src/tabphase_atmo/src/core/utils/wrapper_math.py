@@ -24,16 +24,27 @@ def compute_optical_weight(config: BaseParticleConfig, comp_item) -> float:
 
 
 def normalize_macroscopic_phase(phase_table: np.ndarray, mu: np.ndarray, num_phi_bins: int) -> np.ndarray:
-    """Integrates and normalizes the final combined energy volume."""
+    """
+    Pure Intensity Normalization.
+    Integrates Phase * sin(theta) over the sphere so the total energy = 1.0.
+    """
     theta_linear = np.arccos(mu)
+    sin_theta = np.sin(theta_linear)
 
     if num_phi_bins > 1:
         d_phi = (2.0 * np.pi) / num_phi_bins
-        theta_integrals = np.trapezoid(phase_table * np.sin(theta_linear), theta_linear, axis=2)
+        # 1. Integrate over theta: Phase * sin(theta) d_theta
+        theta_integrals = np.trapezoid(phase_table * sin_theta, theta_linear, axis=2)
+
+        # 2. Integrate over phi
         global_integral = np.sum(theta_integrals * d_phi, axis=1, keepdims=True)
+
         return (phase_table / (global_integral[..., np.newaxis] + 1e-12)).astype(np.float32)
     else:
-        global_integral = np.trapezoid(phase_table * np.sin(theta_linear), theta_linear, axis=1) * 2.0 * np.pi
+        # 1. Integrate over theta: Phase * sin(theta) d_theta
+        # 2. Multiply by 2*PI because phi is uniform
+        global_integral = np.trapezoid(phase_table * sin_theta, theta_linear, axis=1) * (2.0 * np.pi)
+
         return (phase_table / (global_integral[:, np.newaxis] + 1e-12)).astype(np.float32)
 
 

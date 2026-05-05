@@ -123,15 +123,16 @@ def _resolve_raw_habit(config: BaseParticleConfig, comp_item, raw_dir: str, forc
 
 
 def create_atmospheric_phase(config: BaseParticleConfig, up_vector: tuple = (0.0, 0.0, 1.0),
-                             force_regen=False, generate_polar=True, cache_dir="cache"):
+                             force_regen=False,threshold = 10.0, generate_polar=True, cache_dir="cache"):
     raw_dir, bin_path, polar_path = _get_paths(config, cache_dir)
 
     # 1. Final Output Cache Check
     if not force_regen and os.path.exists(bin_path):
         print(f"[Main] Final Mix Cache Hit: {os.path.basename(bin_path)}")
         if generate_polar and not os.path.exists(polar_path):
-            visualize_anisotropic(bin_path, polar_path)
-        return {"type": "atmosphericphase", "filename": bin_path, "up": up_vector}
+            visualize_anisotropic(bin_path)
+            pass
+        return {"type": "atmosphericphase", "filename": bin_path, "up": up_vector}#,"forward_scatter_limit": forward_peak_limit}
 
     print(f"[Main] Assembling new Mix: {os.path.basename(bin_path)}...")
     master_phase_table, master_mu, master_wl = None, None, None
@@ -155,30 +156,30 @@ def create_atmospheric_phase(config: BaseParticleConfig, up_vector: tuple = (0.0
             master_phase_table += shape_table * optical_weight
 
     # 3. Finalize and Apply Similarity Theory (Phase Truncation)
-    print(f"[Main] Applying Similarity Theory (Truncating at 20.0)...")
+    print(f"[Main] Applying Similarity Theory (Truncating at 1.0)...")
     master_phase_table, f_fractions = apply_similarity_truncation(
-        master_phase_table, master_mu, config.num_phi_bins, threshold=1.0
+        master_phase_table, master_mu, config.num_phi_bins, threshold=threshold
     )
 
-    # Calculate average scaling factor for the console readout
-    f_mean = np.mean(f_fractions)
-    scale_factor = 1.0 - f_mean
+    hg_weight_val = float(np.mean(f_fractions))
+    g_val = 0.877
 
-    print(f"\n===========================================================")
-    print(f"🚨 SIMILARITY THEORY APPLIED 🚨")
-    print(f"Forward peak truncated. Missing energy converted to transmittance.")
-    print(f"Avg Energy Removed (f): {f_mean:.4f}")
-    print(f"--> MULTIPLY YOUR `sigma_s` IN MITSUBA BY: {scale_factor:.4f}")
-    print(f"===========================================================\n")
-
+    print(f"[Main] Missing Energy Fraction (f): {hg_weight_val:.4f}")
     print(f"[Main] Saving Master Mix...")
-    save_binary_file(bin_path, master_phase_table, master_mu, master_wl, config)
+
+    # Pass the new variables to the exporter
+    save_binary_file(bin_path, master_phase_table, master_mu, master_wl, config, hg_weight_val, g_val)
 
     if generate_polar:
         try:
-            visualize_anisotropic(bin_path, polar_path)
+            visualize_anisotropic(bin_path)
             print(f"[Main] Polar plot saved to {polar_path}")
         except Exception as e:
             print(f"[Main] Polar plot generation failed: {e}")
 
-    return {"type": "atmosphericphase", "filename": bin_path, "up": up_vector}
+    # Return exactly the same dict for both cache hits and fresh bakes
+    return {
+        "type": "atmosphericphase",
+        "filename": bin_path,
+        "up": up_vector
+    }

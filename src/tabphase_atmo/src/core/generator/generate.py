@@ -134,7 +134,8 @@ def generate_phase_table(config: BaseParticleConfig, backend: ScatteringBackend,
     return phase_table, np.cos(theta), wavelengths
 
 
-def save_binary_file(filename, phase_table, mu_vals, wavelengths, config: BaseParticleConfig):
+def save_binary_file(filename, phase_table, mu_vals, wavelengths, config: BaseParticleConfig, hg_weight: float,
+                     g_val: float):
     if config.num_phi_bins > 1:
         phase_interleaved = np.moveaxis(phase_table, 0, -1)
         phase_interleaved = np.swapaxes(phase_interleaved, 0, 1)
@@ -145,12 +146,17 @@ def save_binary_file(filename, phase_table, mu_vals, wavelengths, config: BasePa
 
     with open(filename, "wb") as f:
         f.write(b"ATMPHASE")
-        f.write(struct.pack("<I", 2))
+        f.write(struct.pack("<I", 3))  # Version bumped to 3!
         f.write(struct.pack("<I", config.num_angles))
         f.write(struct.pack("<I", config.num_phi_bins))
         f.write(struct.pack("<I", len(wavelengths)))
         f.write(struct.pack("<f", float(wavelengths[0])))
         f.write(struct.pack("<f", float(wavelengths[-1])))
+
+        # --- NEW HYBRID PARAMS ---
+        f.write(struct.pack("<f", float(hg_weight)))
+        f.write(struct.pack("<f", float(g_val)))
+
         f.write(data_flat.tobytes())
 
-    print(f"[GEN] Saved binary: {os.path.basename(filename)}")
+    print(f"[GEN] Saved binary v3: {os.path.basename(filename)}")
