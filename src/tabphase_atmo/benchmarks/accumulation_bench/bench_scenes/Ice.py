@@ -1,6 +1,6 @@
 import mitsuba as mi
 from ..utils import get_asset_path, generate_cloud_grid
-from src.core.wrapper import create_atmospheric_phase
+from nimbuscore.core.gen_manager import create_atmospheric_phase
 
 
 def get_scene(config,phase):
