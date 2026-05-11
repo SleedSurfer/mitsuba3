@@ -1,28 +1,15 @@
 import mitsuba as mi
-from ..utils import get_phase_plugin
+
+from nimbuscore import create_atmospheric_phase
 
 
-def get_scene(config):
+def get_scene(config,phase):
     """
     Cornell Box with a spectral FogBox and a dielectric sphere.
     Refactored for the accumulation bench.
     """
 
-    # --- PHASE & ATMOSPHERE ---
-    phase_mist = get_phase_plugin(
-        radius_mean=0.09,
-        radius_std=0.00,
-        note="009_000"
-    )
-
-    # phase_mist = get_phase_plugin(
-    #     radius_mean=0.0,
-    #     radius_std=0.0,
-    #     num_angles=0,
-    #     num_wavelengths=0,
-    #     note="0"
-    # )
-
+    phase = create_atmospheric_phase(phase, (0, 1, 0))
     # Helper to ingest raw XML matrices
     def T(flat_list):
         return mi.ScalarTransform4f(mi.ScalarMatrix4f(flat_list))
@@ -52,7 +39,7 @@ def get_scene(config):
                 'width': config['res_w'],
                 'height': config['res_h'],
                 'pixel_format': 'rgb',
-                'rfilter': {'type': 'box'}
+                'rfilter': {'type': 'tent'}
             },
         },
 
@@ -63,11 +50,9 @@ def get_scene(config):
         'LightBSDF': {'type': 'diffuse', 'reflectance': {'type': 'rgb', 'value': [0.0, 0.0, 0.0]}},
 
         'SphereBSDF': {
-            'type': 'roughdielectric',
+            'type': 'dielectric',
             'int_ior': 1.5,
             'ext_ior': 1.0,
-            'distribution': 'ggx',
-            'alpha': 0.04,
         },
 
         # --- GEOMETRY ---
@@ -118,22 +103,21 @@ def get_scene(config):
                 'type': 'area',
                 'radiance': {
                     'type': 'rgb',
-                    'value': [x*1.5 for x in [360000.0, 300000.0, 270000.0]]
+                    'value': [541127, 381972, 127324]
                 }
             }
         },
 
-        # --- VOLUMETRIC FOG BOX ---
+        #--- VOLUMETRIC FOG BOX ---
         'FogBox': {
             'type': 'cube',
             'to_world': mi.ScalarTransform4f.scale(2.5),
             'bsdf': {'type': 'null'},
             'interior': {
                 'type': 'homogeneous',
-                'sigma_t': 0.35,
-                'albedo': 0.85,
-                'sample_emitters': True,
-                'phase': phase_mist
+                'scale': 0.5,
+                'sigma_t': 1.0,
+                'albedo': 1.0,
             }
         }
     }

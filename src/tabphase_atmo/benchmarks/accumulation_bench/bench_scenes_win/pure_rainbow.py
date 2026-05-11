@@ -1,6 +1,6 @@
 import mitsuba as mi
 
-from src.core import create_atmospheric_phase
+from nimbuscore.core import create_atmospheric_phase
 from ..utils import generate_cloud_grid
 
 def get_scene(config):

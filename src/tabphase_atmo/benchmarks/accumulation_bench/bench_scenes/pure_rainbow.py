@@ -1,13 +1,17 @@
+import time
 import mitsuba as mi
 from ..utils import get_asset_path, generate_cloud_grid
-from src.core.wrapper import create_atmospheric_phase
+from nimbuscore.core.gen_manager import create_atmospheric_phase
 
 
 def get_scene(config,phase):
 
     light_mod = 0.5
     # --- PHASE FUNCTION ---
-    phase_dict = create_atmospheric_phase(phase,up_vector=(0.0, 1.0, 0.0),force_regen=False)
+    t0 = time.perf_counter()
+    phase_dict = create_atmospheric_phase(phase, up_vector=(0.0, 1.0, 0.0), force_regen=True,threshold=1.0)
+    t1 = time.perf_counter()
+    print(f"[timing] create_atmospheric_phase took {t1 - t0:.6f} s")
 
     sun_direction = [0, 0, -1]
 

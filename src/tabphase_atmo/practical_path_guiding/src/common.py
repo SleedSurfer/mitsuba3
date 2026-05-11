@@ -11,56 +11,55 @@ import csv
 Vec3 = Tuple[float, float, float]
 Vec2 = Tuple[float, float]
 
+
 class SurfaceInteractionRecord:
-	"""Custom data struct to hold the recordings together
-	"""
-	DRJIT_STRUCT = {
-		'position' : mi.Vector3f,
-		'direction' : mi.Vector2f,
+    """Unified data struct to hold both surface and volumetric recordings
+    """
+    DRJIT_STRUCT = {
+        'position': mi.Vector3f,
+        'direction': mi.Vector2f,
 
-		# Storation needed for calculation
-		'bsdf' : mi.Color3f,
-		'throughputBsdf' : mi.Color3f,
-		'throughputRadiance' : mi.Spectrum,
-		# 
+        # Storation needed for calculation
+        'bsdf': mi.Spectrum,  # CHANGED FROM Color3f
+        'throughputBsdf': mi.Spectrum,  # CHANGED FROM Color3f
+        'throughputRadiance': mi.Spectrum,
 
-		'radiance_nee' : mi.Color3f,
-		'direction_nee' : mi.Vector2f,
+        'radiance_nee': mi.Spectrum,  # CHANGED FROM Color3f
+        'direction_nee': mi.Vector2f,
 
-		'radiance' : mi.Float,
-		'product' : mi.Spectrum,		# radiance_spectrum * bsdf  (outgoing radiance)
-		
-		'woPdf' : mi.Float,
-		'bsdfPdf' : mi.Float,
-		'dTreePdf' : mi.Float,
-		'statisticalWeight' : mi.Float,
-		'isDelta' : mi.Bool,
+        'radiance': mi.Float,
+        'product': mi.Spectrum,
 
-		'active' : mi.Bool,
-	}
+        'woPdf': mi.Float,
+        'bsdfPdf': mi.Float,
+        'dTreePdf': mi.Float,
+        'statisticalWeight': mi.Float,
+        'isDelta': mi.Bool,
 
-	def __init__(self) -> None:
-		self.position = mi.Vector3f()
-		self.direction = mi.Vector2f()
+        'active': mi.Bool,
+    }
 
-		self.bsdf = mi.Color3f()
-		self.throughputBsdf = mi.Color3f()
-		self.throughputRadiance = mi.Spectrum()
-		
-		self.radiance = mi.Float()
-		self.product = mi.Spectrum()
-		
-		self.woPdf = mi.Float()
-		self.bsdfPdf = mi.Float()
-		self.dTreePdf = mi.Float()
-		self.statisticalWeight = mi.Float()
-		self.isDelta = mi.Bool()
+    def __init__(self) -> None:
+        self.position = mi.Vector3f()
+        self.direction = mi.Vector2f()
 
-		self.active = mi.Bool()
+        self.bsdf = mi.Spectrum()  # CHANGED
+        self.throughputBsdf = mi.Spectrum()  # CHANGED
+        self.throughputRadiance = mi.Spectrum()
 
-	# Custom zero initialize callback
-	# def zero_(self, size):
-	# 	self.radiance += 1
+        self.radiance_nee = mi.Spectrum()  # CHANGED
+        self.direction_nee = mi.Vector2f()
+
+        self.radiance = mi.Float()
+        self.product = mi.Spectrum()
+
+        self.woPdf = mi.Float()
+        self.bsdfPdf = mi.Float()
+        self.dTreePdf = mi.Float()
+        self.statisticalWeight = mi.Float()
+        self.isDelta = mi.Bool()
+
+        self.active = mi.Bool()
 
 
 class PerformanceData:
@@ -116,48 +115,40 @@ def canonicalToDir(p: mi.Vector2f) -> mi.Vector3f:
 
 	dir = mi.Vector3f()
 
-	# 	Phi: xy, CosTheta: z
-	dir.x = sinTheta * cosPhi
-	dir.y = sinTheta * sinPhi
-	dir.z = cosTheta
-
-	# 	Phi: xz, CosTheta: y
+	# # 	Phi: xy, CosTheta: z
 	# dir.x = sinTheta * cosPhi
-	# dir.z = sinTheta * sinPhi
-	# dir.y = cosTheta
+	# dir.y = sinTheta * sinPhi
+	# dir.z = cosTheta
+
+		# Phi: xz, CosTheta: y
+	dir.x = sinTheta * cosPhi
+	dir.z = sinTheta * sinPhi
+	dir.y = cosTheta
 
 	return dir
 
 
 def dirToCanonical(d: mi.Vector3f) -> mi.Vector2f:
-    """
-       Input: Normalized Vector3f
-       Output: Vector2f: x = Phi, y = CosTheta
-          Phi: In normalized range [0, 1]
-          CosTheta: In normalized range [0, 1]
-    """
+	"""
+	   Input: Normalized Vector3f
+	   Output: Vector2f: x = Phi, y = CosTheta
+		  Phi: In normalized range [0, 1]
+		  CosTheta: In normalized range [0, 1]
+	"""
 
-    #  Phi: xy, CosTheta: z
-    cosTheta = dr.clip( d.z, -1.0, 1.0 )
-    phi = dr.atan2(d.y, d.x)
+	# Phi: xz, CosTheta: y (The Pole is now on the Y-axis)
+	cosTheta = dr.clip(d.y, -1.0, 1.0)
+	phi = dr.atan2(d.z, d.x)
 
-    #  Phi: xz, CosTheta: y
-    # cosTheta = dr.clip( d.y, -1.0, 1.0 )
-    # phi = dr.atan2(d.z, d.x)
+	phi = dr.select(phi < 0.0, phi + dr.two_pi, phi)
+	
+	p = mi.Vector2f(0.0)
+	p.x = phi / dr.two_pi
+	p.y = (cosTheta + 1.0) / 2.0
 
-    # ---------------------------------------------------------
-    # THE PURGE: Nuke the mi.Loop.
-    # atan2 only goes down to -pi. We just add 2*pi if it's negative.
-    # ---------------------------------------------------------
-    phi = dr.select(phi < 0.0, phi + dr.two_pi, phi)
-
-    p = mi.Vector2f(0.0)
-    p.x = phi / dr.two_pi
-    p.y = ( cosTheta + 1.0 ) / 2.0
-
-    # Have to check first if the item isfinite, if not then return [0,0]
-    flag = dr.isfinite(d.x) & dr.isfinite(d.y) & dr.isfinite(d.z)
-    return dr.select( flag, p, mi.Vector2f(0.0) )
+	# Have to check first if the item isfinite, if not then return [0,0]
+	flag = dr.isfinite(d.x) & dr.isfinite(d.y) & dr.isfinite(d.z)
+	return dr.select( flag, p, mi.Vector2f(0.0) )
 
 
 def resizeDrJitArray(obj: dr.ArrayBase, newSize: int, isDefaultZero: bool = True) -> dr.ArrayBase:

@@ -80,7 +80,8 @@ def create_sunsky_emitter(
             "sun_direction": sun_direction,
             "turbidity": turbidity,
             "sun_scale": sun_scale,
-            "sky_scale": sky_scale
+            "sky_scale": sky_scale,
+            "sun_aperture": 0.1,
         }
 
     # --- GEOGRAPHICAL TIME SOLVER ---

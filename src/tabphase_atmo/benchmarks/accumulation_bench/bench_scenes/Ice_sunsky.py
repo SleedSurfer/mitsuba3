@@ -1,5 +1,5 @@
 import mitsuba as mi
-
+import time
 from ..utils import (
     get_asset_path,
     create_sunsky_emitter,
@@ -7,12 +7,15 @@ from ..utils import (
     assemble_volume_dict,
     create_sun_aligned_camera
 )
-from src.core.wrapper import create_atmospheric_phase
+from nimbuscore.core.gen_manager import create_atmospheric_phase
 
 
 def get_scene(config, phase, sun_elevation_deg=20.0):
     # 1. Bake the phase function
-    phase_dict = create_atmospheric_phase(phase, up_vector=(0.0, 0.0, 1.0), force_regen=False)
+    start_time = time.perf_counter()
+    phase_dict = create_atmospheric_phase(phase, up_vector=(0.0, 0.0, 1.0), force_regen=True)
+    end_time = time.perf_counter()
+    print(f"Cloud Phase baked in {end_time - start_time:.4f} seconds..")
 
     # 2. Bake the physical cloud
     raw_grid = generate_cirrus_grid(
@@ -33,9 +36,19 @@ def get_scene(config, phase, sun_elevation_deg=20.0):
             "type": "volpath",
             "max_depth": 2,
         },
+        "my_atmo_medium": {
+            "type": "homogeneous",
+            "sigma_t": 0.004,
+            "albedo": 0.98,
+            "phase": phase_dict
+        },
         "sensor": {
             "type": "perspective",
-            "fov": 100.0,
+            "fov":100,
+            "medium": {
+                "type": "ref",
+                "id": "my_atmo_medium"
+            },
             "to_world": create_sun_aligned_camera(sun_elevation_deg, distance=5.0),
             "sampler": {"type": "independent", "sample_count": config.get('batch_size', 1024)},
             "film": {
@@ -51,21 +64,19 @@ def get_scene(config, phase, sun_elevation_deg=20.0):
             sun_elevation_deg=sun_elevation_deg,
             use_direct_vector=True,
             turbidity=2.5,
-            sun_scale=1.0
+            sun_scale=2.5
+
         ),
 
-        "cloud_slab": {
-            "type": "cube",
-            # In a Z-up world, this makes a wide horizontal plate in the sky (X, Y)
-            # that is thin vertically (Z).
-            "to_world": mi.ScalarTransform4f.scale([300.0, 300.0, 0.5]),
-            "bsdf": {"type": "null"},
+        "atmosphere_boundary": {
+            "type": "sphere",
+            "radius": 100.0,  # 5km radius should be plenty
+            "to_world": mi.ScalarTransform4f.translate([0, 0, 0]),  # Center it exactly on the camera
+            "bsdf": {"type": "null"},  # Perfectly transparent
             "interior": {
-                "type": "homogeneous",
-                "sigma_t": 0.15,
-                "albedo": 0.98,
-                "phase": phase_dict,
-            },
+                "type": "ref",
+                "id": "my_atmo_medium"
+            }
         },
         #"cloud_volume": cloud_volume_dict,
     }
