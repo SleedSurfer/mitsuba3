@@ -118,18 +118,19 @@ public:
                                         Mask active) const override {
         MI_MASK_ARGUMENT(active);
 
-        // Vector frame generation
-        Vector3f forward = -dr::normalize(mi.wi);
+        // Frame must be centered on the LIGHT ray (wo), not the view ray!
+        Vector3f forward = dr::normalize(wo);
         Vector3f s_raw = dr::cross(m_up, forward);
         Float s_norm_sqr = dr::squared_norm(s_raw);
         Mask valid_s = s_norm_sqr > 1e-12f;
         Vector3f s = dr::select(valid_s, s_raw * dr::rsqrt(dr::maximum(s_norm_sqr, 1e-16f)), Frame3f(forward).s);
         Vector3f t = dr::cross(forward, s);
 
-        Vector3f local_wo = Vector3f(dr::dot(wo, s), dr::dot(wo, t), dr::dot(wo, forward));
-        Float cos_theta = dr::clip(local_wo.z(), -1.f, 1.f);
+        // Evaluate the incoming view ray (-mi.wi) in the sun's local frame
+        Vector3f local_view = Vector3f(dr::dot(-mi.wi, s), dr::dot(-mi.wi, t), dr::dot(-mi.wi, forward));
+        Float cos_theta = dr::clip(local_view.z(), -1.f, 1.f);
         Float theta = dr::acos(cos_theta);
-        Float phi   = dr::atan2(local_wo.y(), local_wo.x());
+        Float phi   = dr::atan2(-local_view.y(), local_view.x());
 
         Float u = dr::select(phi < 0.f, phi + dr::TwoPi<Float>, phi) * dr::InvTwoPi<Float>;
         Float v = theta * dr::InvPi<Float>;
@@ -152,7 +153,6 @@ public:
         // 3. Blend exactly by the missing energy fraction
         Spectrum final_val = m_hg_weight * hg_val + (1.f - m_hg_weight) * lut_val;
 
-        // Because Phase == PDF for energy conserving models, the mean channel value IS the pdf!
         Float final_pdf = dr::mean(final_val);
 
         return { dr::select(dr::isnan(final_val), 0.f, final_val),
@@ -173,12 +173,17 @@ public:
         // --- Sample HG ---
         Float sqr_term = (1.f - m_g * m_g) / (1.f - m_g + 2.f * m_g * sample2.y());
         Float cos_theta_hg = (1.f + m_g * m_g - sqr_term * sqr_term) / (2.f * m_g);
-        cos_theta_hg = dr::select(dr::abs(m_g) < 1e-4f, 1.f - 2.f * sample2.y(), cos_theta_hg); // fallback
+        cos_theta_hg = dr::select(dr::abs(m_g) < 1e-4f, 1.f - 2.f * sample2.y(), cos_theta_hg);
         Float sin_theta_hg = dr::safe_sqrt(1.f - cos_theta_hg * cos_theta_hg);
         Float phi_hg = dr::TwoPi<Float> * sample2.x();
 
         // ---  Sample LUT ---
-        Float hero_lambda = mi.wavelengths[0]; // Hero wvl selection omitted for brevity/speed
+        UInt32 num_channels = dr::size_v<Spectrum>;
+        Float scaled_s1 = s1_lut * num_channels;
+        UInt32 channel = dr::minimum(UInt32(scaled_s1), num_channels - 1);
+        Float hero_lambda = dr::select(channel == 0, mi.wavelengths[0],
+                            dr::select(channel == 1, mi.wavelengths[1],
+                            dr::select(channel == 2, mi.wavelengths[2], mi.wavelengths[3])));
         auto [sample_pos, dummy_pdf] = m_distr.sample(Point2f(sample2.x(), sample2.y()), &hero_lambda, active);
         Float phi_lut = sample_pos.x() * dr::TwoPi<Float>;
         Float theta_lut = sample_pos.y() * dr::Pi<Float>;
@@ -190,7 +195,7 @@ public:
         Float phi = dr::select(sample_hg, phi_hg, phi_lut);
         auto [sin_phi, cos_phi] = dr::sincos(phi);
 
-        Vector3f wo_local(sin_theta * cos_phi, sin_theta * sin_phi, cos_theta);
+        Vector3f wo_local(sin_theta * cos_phi, -sin_theta * sin_phi, cos_theta);
 
         // Transform to world space
         Vector3f forward = -dr::normalize(mi.wi);
